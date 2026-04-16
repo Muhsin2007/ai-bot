@@ -1,0 +1,223 @@
+{
+  "711113363": {
+    "greeted": true,
+    "tg_name": "Muhsin",
+    "phone": "+998011906",
+    "real_name": "интересует воях",
+    "last_msg_at": 1775738651.148529,
+    "style_score": 0.146,
+    "lang": "ru",
+    "docs_requested": true,
+    "followup_stage": 1,
+    "followup_sent_at": 1775820143.370133,
+    "followup_next_at": null,
+    "gender_score": 0.08,
+    "sales_profile": {
+      "timeline": "soon"
+    },
+    "asked_price": true
+  },
+  "5639580688": {
+    "last_msg_at": 1775817785.4541383,
+    "greeted": true,
+    "tg_name": "Unknown",
+    "real_name": "Что дальше?",
+    "style_score": 0.0,
+    "followup_stage": 2,
+    "followup_sent_at": 1775740941.4951386,
+    "lang": "ru"
+  },
+  "1924354543": {
+    "last_msg_at": 1775583756.4025233,
+    "greeted": true,
+    "tg_name": "#Javoxir",
+    "style_score": 0.035,
+    "real_name": "Что",
+    "lang": "en",
+    "gender_score": 0.08,
+    "followup_stage": 2,
+    "followup_sent_at": 1775740941.6509285
+  },
+  "865875324": {
+    "last_msg_at": 1775567352.6488934,
+    "greeted": true,
+    "tg_name": "Davron",
+    "real_name": "Есть",
+    "style_score": 0.016,
+    "followup_stage": 2,
+    "followup_sent_at": 1775653856.9236
+  },
+  "7121595259": {
+    "last_msg_at": 1775583315.4686816,
+    "greeted": true,
+    "tg_name": "Deepal & Changan - официальный дилер 🇺🇿",
+    "real_name": "сучка",
+    "gender_score": 0.055,
+    "style_score": 0.001,
+    "followup_stage": 0,
+    "followup_sent_at": null,
+    "followup_next_at": null,
+    "lang": "en"
+  },
+  "29702840": {
+    "last_msg_at": 1775743976.8346071,
+    "greeted": true,
+    "tg_name": "Солихжон ака",
+    "style_score": 0.127,
+    "real_name": "а где находитесь?",
+    "gender_score": 0.08,
+    "followup_stage": 2,
+    "followup_sent_at": 1775740941.8650331,
+    "sales_profile": {
+      "timeline": "researching"
+    }
+  },
+  "241253896": {
+    "last_msg_at": 1775573179.0551534,
+    "greeted": true,
+    "tg_name": "N.YA.✋✋",
+    "real_name": "Цена?",
+    "followup_stage": 2,
+    "followup_sent_at": 1775740942.032791
+  },
+  "777000": {
+    "last_msg_at": 1775584494.2507548,
+    "greeted": true,
+    "tg_name": "Telegram",
+    "real_name": "входа",
+    "gender_score": -0.18,
+    "style_score": 0.0,
+    "lang": "ru",
+    "sales_profile": {
+      "timeline": "soon"
+    },
+    "followup_stage": 2,
+    "followup_sent_at": 1775740942.165292
+  },
+  "5034565684": {
+    "lang": "uz",
+    "last_msg_at": 1775584807.9291987
+  },
+  "185476200": {
+    "last_msg_at": 1775585297.116681,
+    "greeted": true,
+    "tg_name": ".",
+    "style_score": 0.042,
+    "gender_score": 0.26,
+    "asked_nasiya": true,
+    "nasiya_notified": true,
+    "lang": "ru",
+    "real_name": "Freed",
+    "sales_profile": {
+      "timeline": "soon"
+    },
+    "phone": "+998908919009",
+    "followup_stage": 2,
+    "followup_sent_at": 1775740942.3182473
+  },
+  "91835497": {
+    "lang": "en",
+    "last_msg_at": 1775651123.6021378,
+    "greeted": true,
+    "tg_name": "Мадийор ака воях сервис",
+    "style_score": 0.0,
+    "gender_score": 0.3,
+    "followup_stage": 2,
+    "followup_sent_at": 1775820143.542051
+  },
+  "3560053": {
+    "last_msg_at": 1775820178.5733814,
+    "greeted": true,
+    "tg_name": "Ak",
+    "real_name": "интересует",
+    "style_score": 0.122,
+    "asked_testdrive": true,
+    "followup_stage": 0,
+    "followup_sent_at": null,
+    "followup_next_at": null
+  },
+  "5250183424": {
+    "real_name": "рассрочки",
+    "last_msg_at": 1775822776.2374387,
+    "greeted": true,
+    "tg_name": "Яночка 🇦🇲",
+    "style_score": 0.049,
+    "sales_profile": {
+      "timeline": "soon"
+    },
+    "followup_stage": 0,
+    "followup_sent_at": null,
+    "followup_next_at": null
+  },
+  "1104442245": {
+    "real_name": "Хорошо",
+    "last_msg_at": 1775740040.1809535
+  },
+  "8515740897": {
+    "last_msg_at": 1775740172.2840307,
+    "lang": "uz",
+    "sales_profile": {
+      "purposes": [
+        "business"
+      ]
+    },
+    "greeted": true,
+    "tg_name": "N.F",
+    "real_name": "Narxlari bilan tanishtir",
+    "asked_price": true,
+    "followup_stage": 1,
+    "followup_sent_at": 1775820144.0017426
+  },
+  "1805881786": {
+    "last_msg_at": 1775740316.1932557,
+    "greeted": true,
+    "tg_name": "Jaxongir",
+    "real_name": "спасибо",
+    "style_score": 0.0,
+    "gender_score": 0.16,
+    "asked_price": true,
+    "followup_stage": 1,
+    "followup_sent_at": 1775820144.1354403
+  },
+  "8072069441": {
+    "real_name": "Voyah free narxi",
+    "sales_profile": {
+      "timeline": "soon"
+    },
+    "lang": "en",
+    "last_msg_at": 1775817769.6934865
+  },
+  "8309375881": {
+    "real_name": "Ассалом",
+    "last_msg_at": 1775819721.6204424,
+    "greeted": true,
+    "tg_name": "Сардор",
+    "style_score": 0.0
+  },
+  "1087350041": {
+    "last_msg_at": 1775821033.8903844,
+    "lang": "uz",
+    "greeted": true,
+    "tg_name": "Aziza Absamatovna",
+    "real_name": "Rahmat",
+    "style_score": 0.0
+  },
+  "932956655": {
+    "last_msg_at": 1775819641.57934,
+    "greeted": true,
+    "tg_name": "А А",
+    "style_score": 0.131,
+    "gender_score": 0.3,
+    "lang": "uz",
+    "sales_profile": {
+      "budget_hint": "000 миллион"
+    }
+  },
+  "48653021": {
+    "last_msg_at": 1775823462.903845,
+    "greeted": true,
+    "tg_name": "Turdali Usmanov",
+    "real_name": "Ассалом алайкум",
+    "style_score": 0.03
+  }
+}

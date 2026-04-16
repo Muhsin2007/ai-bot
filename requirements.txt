@@ -1,0 +1,18 @@
+telethon==1.36.0
+anthropic>=0.25.0
+python-dotenv==1.0.0
+
+# Голосовые сообщения (транскрипция через OpenAI Whisper API)
+openai>=1.14.0
+
+# ИЛИ для локальной транскрипции (без интернета):
+# faster-whisper>=1.0.0
+
+# Google Sheets интеграция
+gspread>=6.0.0
+google-auth>=2.0.0
+google-auth-oauthlib>=1.0.0
+
+# ffmpeg — системный пакет (не pip):
+# Ubuntu/Debian: sudo apt install ffmpeg
+# Windows: https://ffmpeg.org/download.html

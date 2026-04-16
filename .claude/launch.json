@@ -1,0 +1,26 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "TAT AUTO Bot",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["main.py"],
+      "port": 0,
+      "description": "Main Telegram AI agent — listens for messages, handles sales, follow-ups, stickers"
+    },
+    {
+      "name": "Config Checker",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["test.py"],
+      "port": 0,
+      "description": "Validates .env variables (API keys, ffmpeg) before running the bot"
+    },
+    {
+      "name": "Training Tool",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["learn.py"],
+      "port": 0,
+      "description": "Interactive training — add Q&A pairs, show stats, auto-import manager dialogues"
+    }
+  ]
+}

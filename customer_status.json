@@ -1,0 +1,32 @@
+{
+  "711113363": {
+    "purchased": false,
+    "interested": true,
+    "interested_model": "free_318"
+  },
+  "107340559": {
+    "purchased": false,
+    "interested": true,
+    "interested_model": "free_318"
+  },
+  "7121595259": {
+    "purchased": true,
+    "purchased_model": "неизвестная модель",
+    "interested": false
+  },
+  "29702840": {
+    "purchased": false,
+    "interested": true,
+    "interested_model": "free_318"
+  },
+  "185476200": {
+    "purchased": false,
+    "interested": true,
+    "interested_model": "free_318"
+  },
+  "5250183424": {
+    "purchased": false,
+    "interested": true,
+    "interested_model": "free_318"
+  }
+}
