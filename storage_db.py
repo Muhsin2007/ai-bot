@@ -14,7 +14,8 @@ from contextlib import contextmanager
 
 log = logging.getLogger("tat_auto")
 
-DB_FILE = "data/tat_auto.db"
+DB_FILE        = "data/tat_auto.db"
+MIGRATION_FLAG = "data/.migrated"   # файл-маркер: миграция уже была выполнена
 
 DEFAULT_PRICES = (
     "Voyah Courage 650 — 473 000 000 сум\n"
@@ -338,6 +339,10 @@ def get_upcoming_appointments() -> list:
 
 def migrate_from_json():
     """Переносит данные из старых JSON-файлов в SQLite. Запускать один раз."""
+    # WARN #8 fix: пропускаем если уже мигрировали
+    if os.path.exists(MIGRATION_FLAG):
+        return
+
     migrated_any = False
 
     # client_data.json
@@ -434,3 +439,10 @@ def migrate_from_json():
         log.info("Миграция JSON → SQLite завершена.")
     else:
         log.info("JSON-файлы не найдены — миграция не нужна.")
+
+    # Записываем флаг чтобы при следующем старте не проверять снова
+    try:
+        with open(MIGRATION_FLAG, "w", encoding="utf-8") as f:
+            f.write("done")
+    except Exception as e:
+        log.warning("Не удалось записать флаг миграции: %s", e)
