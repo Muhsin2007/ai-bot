@@ -16,6 +16,7 @@ import time
 
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
+from telethon.sessions import StringSession
 from telethon.tl.types import User
 from telethon.tl.functions.messages import SendMediaRequest
 from telethon.tl.types import InputMediaVenue, InputGeoPoint
@@ -746,7 +747,11 @@ async def main():
     migrate_from_json()
     setup_shutdown_handlers()
 
-    client = TelegramClient("agent_session", API_ID, API_HASH)
+    # StringSession — для Docker/сервера (сессия из env-переменной TG_SESSION).
+    # Если TG_SESSION не задана — используем локальный файл agent_session.session.
+    _tg_session = os.getenv("TG_SESSION", "").strip()
+    session     = StringSession(_tg_session) if _tg_session else "agent_session"
+    client      = TelegramClient(session, API_ID, API_HASH)
 
     # ── ВХОДЯЩИЕ СООБЩЕНИЯ ───────────────────────────────────────────────────
     # func=lambda e: e.is_private — группы не попадают в обработчик вообще
