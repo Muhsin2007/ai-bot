@@ -25,11 +25,11 @@ from safe_telethon import safe_send
 from shutdown import shutdown_event, setup_shutdown_handlers, backup_worker, finalize
 from storage_db import (
     init_db, migrate_from_json,
-    load_history, save_history, add_message, get_chat_history, has_messages,
+    add_message, get_chat_history, has_messages,
     get_client_info, set_client_info, get_all_clients,
     get_client_stage, set_client_stage,
     load_prices, save_prices,
-    load_summary, save_summary,
+    save_summary,
     save_appointment, get_upcoming_appointments,
 )
 from ai_handler import (
@@ -73,6 +73,14 @@ MODEL_PHOTOS: dict[str, list[str]] = {
     "free_plus": ["photos/free_plus_1.jpg","photos/free_plus_2.jpg"],
     "m817":      ["photos/m817_1.jpg",     "photos/m817_2.jpg"],
     "taishan":   ["photos/taishan_1.jpg",  "photos/taishan_2.jpg"],
+}
+
+
+# Fallback-ответ если Claude API временно недоступен
+_FALLBACK_REPLIES = {
+    "ru": "Одну секунду, уточняю информацию. Если срочно — позвоните нам: +998 95 004 97 49",
+    "uz": "Bir daqiqa, ma'lumotni aniqlayman. Shoshilinch bo'lsa: +998 95 004 97 49",
+    "en": "One moment please. For urgent matters call us: +998 95 004 97 49",
 }
 
 
@@ -296,6 +304,7 @@ async def _handle_testdrive_step(client: TelegramClient, chat_id: int,
         state["step"]     = "ask_phone"
         q = _TD_QUESTIONS["ask_phone"].get(lang, _TD_QUESTIONS["ask_phone"]["ru"])
         await safe_send(client.send_message, chat_id, q)
+        add_message({}, chat_id, "assistant", q)   # BUG #4 fix
         _mark_sent(chat_id)
         return True
 
@@ -314,6 +323,7 @@ async def _handle_testdrive_step(client: TelegramClient, chat_id: int,
 
         confirm = _TD_QUESTIONS["confirm"].get(lang, _TD_QUESTIONS["confirm"]["ru"])
         await safe_send(client.send_message, chat_id, confirm)
+        add_message({}, chat_id, "assistant", confirm)   # BUG #4 fix
         _mark_sent(chat_id)
 
         asyncio.create_task(_notify(client,
@@ -486,7 +496,9 @@ async def _reply(client: TelegramClient, chat_id: int, text: str, name: str,
         gender=gender,
     )
     if not reply:
-        return
+        # AI недоступен — отвечаем fallback-сообщением чтобы клиент не висел без ответа
+        reply = _FALLBACK_REPLIES.get(lang, _FALLBACK_REPLIES["ru"])
+        log.warning("AI вернул None — использую fallback для chat_id=%d", chat_id)
 
     # ── 15. Отправляем ответ ─────────────────────────────────────────────────
     await safe_send(client.send_message, chat_id, reply)
@@ -740,43 +752,42 @@ async def main():
     # func=lambda e: e.is_private — группы не попадают в обработчик вообще
     @client.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
     async def on_incoming(event):
-        if not await _should_handle(event):
-            return
+        try:
+            if not await _should_handle(event):
+                return
 
-        # Дедупликация по message_id
-        msg_id = event.id
-        if msg_id in _processed_ids:
-            return
-        _processed_ids.add(msg_id)
-        # Чистим старые ID чтобы set не рос бесконечно
-        if len(_processed_ids) > 2000:
-            for old_id in sorted(_processed_ids)[:1000]:
-                _processed_ids.discard(old_id)
+            # Дедупликация по message_id
+            msg_id = event.id
+            if msg_id in _processed_ids:
+                return
+            _processed_ids.add(msg_id)
+            # Чистим старые ID чтобы set не рос бесконечно
+            if len(_processed_ids) > 2000:
+                for old_id in sorted(_processed_ids)[:1000]:
+                    _processed_ids.discard(old_id)
 
-        text = event.raw_text
-        if not text:
-            return
+            text = event.raw_text
+            if not text:
+                return
 
-        chat_id = event.chat_id
+            chat_id = event.chat_id
+            name    = await _get_name_from_event(event)
+            lang    = detect_language(text)
 
-        # Антиспам
-        if not _can_send(chat_id, cooldown_min=1):
-            return
+            # Обновляем данные клиента
+            info    = get_client_info(chat_id)
+            updates = {"lang": lang}
+            if not info.get("name") and name != "Клиент":
+                updates["name"] = name
+            set_client_info(chat_id, **updates)
 
-        name = await _get_name_from_event(event)
-        lang = detect_language(text)
+            msg_ts = event.date.timestamp()
+            log.info("← %s | %s | %s", name, lang, text[:80])
 
-        # Обновляем данные клиента
-        info    = get_client_info(chat_id)
-        updates = {"lang": lang}
-        if not info.get("name") and name != "Клиент":
-            updates["name"] = name
-        set_client_info(chat_id, **updates)
+            await _reply(client, chat_id, text, name, lang, msg_ts=msg_ts)
 
-        msg_ts = event.date.timestamp()
-        log.info("%s | %s | %s", name, lang, text[:60])
-
-        await _reply(client, chat_id, text, name, lang, msg_ts=msg_ts)
+        except Exception:
+            log.exception("Ошибка on_incoming [chat=%s]", getattr(event, "chat_id", "?"))
 
     # ── ИСХОДЯЩИЕ СООБЩЕНИЯ (команды менеджера) ──────────────────────────────
     @client.on(events.NewMessage(outgoing=True))
@@ -816,11 +827,12 @@ async def main():
     log.info("Follow-up: ОТКЛЮЧЁН (бот не пишет первым)")
     log.info("═══════════════════════════════════════")
 
+    # Фиксируем время старта ДО обработки пропущенных (BUG #1 fix)
+    # Живые события с timestamp < _startup_ts будут игнорированы
+    _startup_ts = time.time()
+
     # Обрабатываем сообщения пока бот был выключен
     await reply_to_missed(client)
-
-    # После обработки пропущенных — начинаем принимать живые события
-    _startup_ts = time.time()
 
     # Фоновые задачи
     asyncio.create_task(backup_worker())   # автобэкап каждые 6 часов

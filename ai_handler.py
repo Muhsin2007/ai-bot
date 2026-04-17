@@ -89,10 +89,8 @@ _OPTOUT_KW = [
     "не интересует", "не интересуюсь", "неинтересует",
     "не пишите", "не пишите мне", "не беспокойте",
     "хватит писать", "больше не пишите", "прекратите писать",
-    "не надо писать", "передумал", "передумала",
-    "нашёл другой", "нашла другой", "купил у других",
-    "взял у других", "взяла у других",
-    "не нужно", "больше не нужно", "отстаньте",
+    "не надо писать", "нашёл другой", "нашла другой", "купил у других",
+    "взял у других", "взяла у других", "отстаньте",
     "не беспокойте меня", "купил в другом",
     # Uzbek Latin
     "sotib oldim", "xarid qildim", "qiziqmayapman",
@@ -716,7 +714,7 @@ async def get_ai_reply(
     for attempt in range(2):
         try:
             resp = await asyncio.wait_for(
-                asyncio.get_event_loop().run_in_executor(None, _call),
+                asyncio.get_running_loop().run_in_executor(None, _call),
                 timeout=60.0,
             )
             text = resp.content[0].text.strip()
@@ -726,16 +724,21 @@ async def get_ai_reply(
             return text
 
         except asyncio.TimeoutError:
-            log.warning("AI timeout (попытка %d/2)", attempt + 1)
+            log.warning("AI timeout (попытка %d/2) chat_id=%s", attempt + 1, chat_id)
 
         except Exception as e:
-            if "rate_limit" in str(e).lower():
-                log.warning("AI rate limit, жду 5 сек...")
+            err = str(e).lower()
+            if "rate_limit" in err or "overloaded" in err:
+                log.warning("AI rate_limit/overloaded, жду 5 сек (chat_id=%s)...", chat_id)
                 await asyncio.sleep(5)
+            elif "invalid_api_key" in err or "authentication" in err:
+                log.error("AI: неверный API-ключ! Проверь ANTHROPIC_API_KEY в .env")
+                break
             else:
-                log.error("Ошибка AI: %s", e)
+                log.exception("AI ошибка (chat_id=%s): %s", chat_id, e)
                 break
 
+    log.warning("AI не вернул ответ для chat_id=%s", chat_id)
     return None
 
 
@@ -752,7 +755,7 @@ async def generate_summary(messages: list) -> str:
     )
     req = messages[-30:] + [{"role": "user", "content": prompt}]
     try:
-        resp = await asyncio.get_event_loop().run_in_executor(
+        resp = await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: _ai.messages.create(
                 model="claude-haiku-4-5-20251001",
