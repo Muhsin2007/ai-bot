@@ -1,0 +1,53 @@
+# Секреты — НИКОГДА не заливать
+.env
+*.env
+google_credentials.json
+graphite-*.json
+*credentials*.json
+*secret*.json
+
+# Telegram сессия (содержит токен авторизации!)
+*.session
+*.session-journal
+
+# База данных (личные данные клиентов)
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# JSON данные клиентов
+client_data.json
+chat_history.json
+history.json
+conversation_summaries.json
+customer_status.json
+training_data.json
+unknown_questions.json
+local_test_drives.json
+appointments.json
+summaries.json
+prices.json
+
+# Бэкапы
+backups/
+
+# Логи
+logs/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# Фото (большие файлы — хранить отдельно)
+photos/
+
+# Системное
+.DS_Store
+Thumbs.db
+*.xz
