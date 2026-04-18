@@ -2,6 +2,7 @@
 AI handler — Claude API, language detection, intent detection.
 """
 import asyncio
+import json
 import logging
 import os
 import random
@@ -9,7 +10,7 @@ import random
 import anthropic
 from dotenv import load_dotenv
 
-from storage_db import load_prices, load_summary
+from storage_db import load_prices, load_summary, load_client_facts, save_client_facts
 
 load_dotenv()
 _ai  = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
@@ -473,6 +474,80 @@ def get_followup_message(stage: int, lang: str = "ru", name: str = "") -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# HESITATION DETECTION — клиент колеблется / откладывает
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Используем стебли слов — работают лучше для русской морфологии
+_HESITATION_HIGH = [
+    # Русский — прямое откладывание
+    "подумаю", "подумать", "подума",
+    "посмотрю", "посмотреть",
+    "не спешу", "не тороплюсь",
+    "посоветуюсь", "посоветоваться", "посовет",
+    "обсужу", "обсудим", "обсуд",
+    "не готов", "не готова",
+    "позже", "попозже", "потом напишу", "позднее напиш",
+    # Узбекский
+    "o'ylab ko'raman", "o'ylab ko'ray", "keyin yozaman",
+    "maslahatlash", "maslahat qilib",
+    "qaror qilmad", "shoshilmayapman", "shoshilmayman",
+    "ойлаб кўраман", "кейин ёзаман", "маслаҳатлаш",
+]
+
+_HESITATION_MEDIUM = [
+    # Русский — сравнение / неопределённость
+    "сравниваю", "смотрю варианты", "рассматриваю",
+    "ещё не решил", "ещё не решила",
+    "не решил", "не решила",
+    "пока не знаю", "раздумываю", "взвешиваю",
+    # Узбекский
+    "solishtiryapman", "solishtirmoqchiman",
+    "hali bilmayman", "qaror qilmadim",
+    "солиштиряпман", "ҳали билмайман",
+]
+
+_HESITATION_LOW = [
+    # Русский — ценовое возражение / слабое сомнение
+    "дорого", "дороговато", "дороговат",
+    "немного дорого", "чуть дорого",
+    "не уверен", "не уверена",
+    "подумаем", "посмотрим", "может быть", "возможно",
+    "наверное", "наверно",
+    # Узбекский
+    "qimmat", "qimmatroq", "biroz qimmat",
+    "bilmayman", "balki", "ehtimol",
+    "қиммат", "билмайман", "балки",
+]
+
+
+def detect_hesitation(text: str) -> tuple[str | None, float]:
+    """
+    Возвращает (уровень, score) или (None, 0.0).
+    Уровни: 'высокий' (0.9) / 'средний' (0.6) / 'слабый' (0.3).
+
+    Снижает score вдвое если сообщение длинное и содержит '?' —
+    скорее всего это вопрос, а не отказ.
+    """
+    t = text.lower()
+    level, score = None, 0.0
+
+    if any(kw in t for kw in _HESITATION_HIGH):
+        level, score = "высокий", 0.9
+    elif any(kw in t for kw in _HESITATION_MEDIUM):
+        level, score = "средний", 0.6
+    elif any(kw in t for kw in _HESITATION_LOW):
+        level, score = "слабый", 0.3
+
+    # Длинное сообщение с вопросом → снижаем уверенность
+    if level and len(text) > 60 and "?" in text:
+        score *= 0.5
+        if score < 0.25:
+            level, score = None, 0.0
+
+    return level, score
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # GENDER DETECTION
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -536,6 +611,37 @@ _HONORIFICS = {
     "female": {"uz": "опа",     "ru": "уважаемая", "en": "ma'am"},
     None:     {"uz": "ака/опа", "ru": "",          "en": ""},
 }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CLIENT MEMORY CONTEXT
+# ══════════════════════════════════════════════════════════════════════════════
+
+_FACT_LABELS = {
+    "model":      "Интересуется моделью",
+    "budget":     "Бюджет",
+    "concern":    "Главное возражение",
+    "competitor": "Сравнивал с",
+    "timeline":   "Когда планирует купить",
+    "payment":    "Способ оплаты",
+    "family":     "Семья / кол-во мест",
+}
+
+
+def _build_memory_context(chat_id: int) -> str:
+    """Формирует блок контекста из долгосрочной памяти о клиенте."""
+    if not chat_id:
+        return ""
+    facts = load_client_facts(chat_id)
+    if not facts:
+        return ""
+    lines = ["[ПАМЯТЬ О КЛИЕНТЕ (из прошлых разговоров):"]
+    for key, label in _FACT_LABELS.items():
+        val = facts.get(key)
+        if val:
+            lines.append(f"  • {label}: {val}")
+    lines.append("Учитывай эти факты. Не спрашивай заново то что уже знаешь.]")
+    return "\n".join(lines)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -641,6 +747,11 @@ def _build_system(chat_id: int = None, name: str = "", lang: str = "ru",
         )
 
     if chat_id:
+        # Долгосрочная память — конкретные факты о клиенте
+        memory_ctx = _build_memory_context(chat_id)
+        if memory_ctx:
+            extra_parts.append(f"\n{memory_ctx}")
+        # Краткое резюме последних разговоров
         summary = load_summary(chat_id)
         if summary:
             extra_parts.append(f"\n[Краткое резюме прошлых разговоров: {summary}]")
@@ -775,6 +886,64 @@ async def generate_summary(messages: list) -> str:
     except Exception as e:
         log.warning("Ошибка summary: %s", e)
         return ""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FACT EXTRACTION  (долгосрочная память)
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def extract_facts(messages: list, chat_id: int):
+    """
+    Извлекает структурированные факты о клиенте через Claude Haiku.
+    Вызывается в фоне — ошибки не влияют на основной флоу.
+    Анализирует только сообщения клиента (role=user).
+    """
+    user_msgs = [m for m in messages[-16:] if m.get("role") == "user"]
+    if len(user_msgs) < 2:
+        return
+
+    prompt = (
+        "Из сообщений клиента ниже извлеки факты в JSON. "
+        "Верни ТОЛЬКО валидный JSON без пояснений. "
+        "Используй null если информации нет:\n"
+        '{"model":"название модели авто или null",'
+        '"budget":"бюджет числом в сумах или null",'
+        '"concern":"главное возражение или вопрос клиента или null",'
+        '"competitor":"конкурент которого упомянул или null",'
+        '"timeline":"когда планирует купить или null",'
+        '"payment":"кредит/наличные/насия или null",'
+        '"family":"кол-во мест или размер семьи или null"}\n\n'
+        "Сообщения клиента:\n"
+        + "\n".join(f"- {m['content'][:250]}" for m in user_msgs)
+    )
+
+    try:
+        resp = await asyncio.wait_for(
+            asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: _ai.messages.create(
+                    model="claude-haiku-4-5",
+                    max_tokens=180,
+                    messages=[{"role": "user", "content": prompt}],
+                ),
+            ),
+            timeout=20.0,
+        )
+        raw = resp.content[0].text.strip()
+        if "```" in raw:
+            raw = raw.split("```")[1].lstrip("json\n").strip()
+        facts = json.loads(raw)
+        facts = {k: v for k, v in facts.items()
+                 if v and str(v).lower() not in ("null", "none", "")}
+        if facts:
+            save_client_facts(chat_id, facts)
+            log.debug("Факты обновлены [%d]: %s", chat_id, facts)
+    except json.JSONDecodeError as e:
+        log.warning("extract_facts: невалидный JSON (chat_id=%d): %s", chat_id, e)
+    except asyncio.TimeoutError:
+        log.warning("extract_facts: timeout (chat_id=%d)", chat_id)
+    except Exception as e:
+        log.warning("extract_facts: %s (chat_id=%d)", e, chat_id)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

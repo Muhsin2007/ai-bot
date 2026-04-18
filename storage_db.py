@@ -107,6 +107,14 @@ def init_db():
                 id   INTEGER PRIMARY KEY CHECK(id = 1),
                 text TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS client_facts (
+                chat_id    INTEGER NOT NULL,
+                fact_type  TEXT    NOT NULL,
+                fact_value TEXT    NOT NULL,
+                updated_at REAL    NOT NULL,
+                PRIMARY KEY (chat_id, fact_type)
+            );
         """)
     # Добавляем opted_out если столбец отсутствует (миграция существующих БД)
     try:
@@ -343,6 +351,38 @@ def save_summary(chat_id: int, summary: str):
 # ══════════════════════════════════════════════════════════════════════════════
 # APPOINTMENTS
 # ══════════════════════════════════════════════════════════════════════════════
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CLIENT FACTS  (долгосрочная память об интересах клиента)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def save_client_facts(chat_id: int, facts: dict):
+    """Upsert фактов о клиенте. Только непустые значения."""
+    now = time.time()
+    with _raw_conn() as conn:
+        for fact_type, fact_value in facts.items():
+            if fact_type and fact_value and str(fact_value).lower() != "null":
+                conn.execute(
+                    "INSERT OR REPLACE INTO client_facts"
+                    " (chat_id, fact_type, fact_value, updated_at)"
+                    " VALUES (?, ?, ?, ?)",
+                    (chat_id, str(fact_type), str(fact_value), now),
+                )
+
+
+def load_client_facts(chat_id: int, max_age_days: int = 30) -> dict:
+    """Возвращает факты о клиенте не старше max_age_days дней."""
+    if not chat_id:
+        return {}
+    cutoff = time.time() - max_age_days * 86400
+    with _raw_conn() as conn:
+        rows = conn.execute(
+            "SELECT fact_type, fact_value FROM client_facts"
+            " WHERE chat_id = ? AND updated_at > ?",
+            (chat_id, cutoff),
+        ).fetchall()
+    return {r["fact_type"]: r["fact_value"] for r in rows}
+
 
 def load_appointments() -> list:
     with _raw_conn() as conn:

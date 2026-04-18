@@ -42,6 +42,7 @@ from ai_handler import (
     get_followup_message,
     is_asking_price, is_asking_location, is_asking_photo,
     get_model_from_text, get_all_models_from_text,
+    detect_hesitation, extract_facts,
 )
 
 load_dotenv()
@@ -562,15 +563,16 @@ async def _reply(client: TelegramClient, chat_id: int, text: str, name: str,
     messages = get_chat_history({}, chat_id, limit=20)
 
     # ── 6. Определяем намерения ─────────────────────────────────────────────
-    asking_price     = is_asking_price(text)
-    asking_location  = is_asking_location(text)
-    asking_photo     = is_asking_photo(text)
-    asking_testdrive = detect_testdrive(text)
-    model_key        = _resolve_model(text, chat_id, messages)
-    competitor_key   = detect_competitor(text)
-    has_tradein      = detect_tradein(text)
-    buying_intent    = detect_buying_intent(text)
-    only_greeting    = is_greeting_only(text)
+    asking_price      = is_asking_price(text)
+    asking_location   = is_asking_location(text)
+    asking_photo      = is_asking_photo(text)
+    asking_testdrive  = detect_testdrive(text)
+    model_key         = _resolve_model(text, chat_id, messages)
+    competitor_key    = detect_competitor(text)
+    has_tradein       = detect_tradein(text)
+    buying_intent     = detect_buying_intent(text)
+    only_greeting     = is_greeting_only(text)
+    hesitation_level, h_score = detect_hesitation(text)
 
     # ── 7. Данные клиента ───────────────────────────────────────────────────
     info         = get_client_info(chat_id)
@@ -581,6 +583,18 @@ async def _reply(client: TelegramClient, chat_id: int, text: str, name: str,
 
     if gender and not info.get("gender"):
         set_client_info(chat_id, gender=gender)
+
+    # Обновляем hesitation_score через EMA (экспоненциальное сглаживание)
+    h_prev = float(info.get("hesitation_score", 0.0))
+    if h_score > 0:
+        # Новый сигнал — поднимаем score
+        new_h = min(1.0, h_prev * 0.7 + h_score * 0.3)
+    else:
+        # Нейтральное сообщение — медленный decay
+        new_h = max(0.0, h_prev * 0.85)
+    if abs(new_h - h_prev) > 0.01:
+        set_client_info(chat_id, hesitation_score=new_h)
+
     if model_key:
         _update_active_model(chat_id, model_key)
         # Явное упоминание в текущем тексте → обновляем даже если модель была другая
@@ -601,6 +615,18 @@ async def _reply(client: TelegramClient, chat_id: int, text: str, name: str,
             f"Модель: {info.get('model', '?')}\n"
             f"Сообщение: «{text[:200]}»"))
         set_client_stage(chat_id, "interested")
+        # Сбрасываем колебание — клиент готов купить
+        if h_prev > 0:
+            set_client_info(chat_id, hesitation_score=0.0)
+            new_h = 0.0
+
+    # Уведомляем менеджера при первом явном колебании
+    if hesitation_level == "высокий" and h_prev < 0.4:
+        log.info("🤔 РАЗДУМЫВАЕТ: %s (%d)", name, chat_id)
+        asyncio.create_task(_notify(client,
+            f"🤔 РАЗДУМЫВАЕТ: {name} (ID: {chat_id})\n"
+            f"Модель: {info.get('model', '?')}\n"
+            f"«{text[:200]}»"))
 
     # ── 9. Доп. контекст для AI ─────────────────────────────────────────────
     extra_parts = []
@@ -626,6 +652,27 @@ async def _reply(client: TelegramClient, chat_id: int, text: str, name: str,
             "[Клиент только поздоровался. "
             "Ответь его же приветствием, кратко представься как менеджер TAT AUTO "
             "и спроси чем можешь помочь — одним предложением.]"
+        )
+
+    # ── Контекст при колебании клиента ──────────────────────────────────────
+    if hesitation_level == "высокий" or new_h > 0.7:
+        extra_parts.append(
+            "[Клиент откладывает решение. НЕ ДАВИ. "
+            "Прими спокойно — скажи что готов помочь когда решит. "
+            "Не предлагай тест-драйв и кредит прямо сейчас. "
+            "Один короткий ответ без списков.]"
+        )
+    elif hesitation_level == "средний" or new_h > 0.4:
+        extra_parts.append(
+            "[Клиент сравнивает варианты. Мягко выдели одно уникальное преимущество "
+            "нашего автомобиля. Можно предложить тест-драйв как способ принять решение — "
+            "без давления, одним предложением.]"
+        )
+    elif hesitation_level == "слабый" or new_h > 0.2:
+        extra_parts.append(
+            "[Клиент упомянул цену. Не оправдывайся — объясни ценность. "
+            "Напомни об OFB кредите: взнос от 25%, срок до 60 мес., "
+            "конкретную ставку назови исходя из возможного взноса.]"
         )
 
     extra_context = "\n".join(extra_parts)
@@ -712,17 +759,22 @@ async def _reply(client: TelegramClient, chat_id: int, text: str, name: str,
 
 
 async def _update_summary_bg(chat_id: int):
-    # Используем реальный счётчик из БД — get_chat_history возвращает не более 30,
-    # что при len() % 10 == 0 давало бы False-positive для активных чатов (30 % 10 == 0 всегда True).
+    """Фоновое обновление резюме (каждые 10 сообщений) и памяти фактов (каждые 4)."""
     total = count_messages(chat_id)
-    if total < 6:
+    if total < 4:
         return
-    if total % 10 != 0:
-        return
+
     msgs = get_chat_history({}, chat_id, limit=30)
-    summary = await generate_summary(msgs)
-    if summary:
-        save_summary(chat_id, summary)
+
+    # Факты о клиенте — каждые 4 сообщения (дёшево, Haiku)
+    if total % 4 == 0:
+        await extract_facts(msgs, chat_id)
+
+    # Краткое резюме — каждые 10 сообщений (чуть дороже)
+    if total >= 6 and total % 10 == 0:
+        summary = await generate_summary(msgs)
+        if summary:
+            save_summary(chat_id, summary)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
