@@ -26,7 +26,7 @@ from safe_telethon import safe_send
 from shutdown import shutdown_event, setup_shutdown_handlers, backup_worker, finalize
 from storage_db import (
     init_db, migrate_from_json,
-    add_message, get_chat_history, has_messages,
+    add_message, get_chat_history, has_messages, count_messages,
     get_client_info, set_client_info, get_all_clients,
     get_client_stage, set_client_stage,
     load_prices, save_prices,
@@ -45,8 +45,8 @@ from ai_handler import (
 
 load_dotenv()
 
-API_ID     = int(os.getenv("TG_API_ID"))
-API_HASH   = os.getenv("TG_API_HASH")
+API_ID     = int(os.getenv("TG_API_ID", "0"))
+API_HASH   = os.getenv("TG_API_HASH", "")
 MANAGER_ID = int(os.getenv("MANAGER_ID", "0"))
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -95,6 +95,7 @@ _processed_ids: set[int]         = set()  # message_id уже обработан
 _tg_loaded:     set[int]         = set()  # chat_id для которых уже загружена история
 
 _td_state: dict[int, dict] = {}   # состояние флоу тест-драйва по chat_id
+_TD_FLOW_TIMEOUT = 30 * 60        # сек — заброшенный флоу автоматически сбрасывается
 
 me_id:       int   = 0
 _startup_ts: float = 0.0
@@ -116,6 +117,22 @@ def _can_send(chat_id: int, cooldown_min: int = ANTISPAM_COOLDOWN_MIN) -> bool:
 
 def _mark_sent(chat_id: int):
     _bot_sent[chat_id] = time.time()
+    # Периодически чистим устаревшие записи чтобы dict не рос бесконечно
+    if len(_bot_sent) > 500:
+        _cleanup_old_timestamps()
+
+
+def _cleanup_old_timestamps():
+    """Удаляет записи старше 2 часов из in-memory словарей."""
+    cutoff = time.time() - 7200  # 2 часа
+    stale_bot    = [k for k, v in _bot_sent.items()    if v < cutoff]
+    stale_manual = [k for k, v in _manual_sent.items() if v < cutoff]
+    for k in stale_bot:
+        _bot_sent.pop(k, None)
+    for k in stale_manual:
+        _manual_sent.pop(k, None)
+    if stale_bot or stale_manual:
+        log.debug("Очищено временных меток: bot=%d manual=%d", len(stale_bot), len(stale_manual))
 
 
 def _is_opted_out(chat_id: int) -> bool:
@@ -298,6 +315,12 @@ async def _handle_testdrive_step(client: TelegramClient, chat_id: int,
     if not state:
         return False
 
+    # Сбрасываем заброшенный флоу (клиент не отвечал 30+ минут)
+    if time.time() - state.get("started", 0) > _TD_FLOW_TIMEOUT:
+        log.info("Флоу тест-драйва истёк для chat_id=%d — сбрасываем", chat_id)
+        del _td_state[chat_id]
+        return False
+
     step = state.get("step")
 
     if step == "ask_datetime":
@@ -341,7 +364,7 @@ async def _handle_testdrive_step(client: TelegramClient, chat_id: int,
 
 
 def _start_testdrive_flow(chat_id: int, lang: str) -> str:
-    _td_state[chat_id] = {"step": "ask_datetime"}
+    _td_state[chat_id] = {"step": "ask_datetime", "started": time.time()}
     return _TD_QUESTIONS["ask_datetime"].get(lang, _TD_QUESTIONS["ask_datetime"]["ru"])
 
 
@@ -401,7 +424,7 @@ async def _reply(client: TelegramClient, chat_id: int, text: str, name: str,
     # ── 7. Данные клиента ───────────────────────────────────────────────────
     info         = get_client_info(chat_id)
     is_new       = not info.get("greeted", False)
-    display_name = info.get("real_name") or (name if name != "Клиент" else "")
+    display_name = info.get("name") or (name if name != "Клиент" else "")
     gender       = info.get("gender") or detect_gender(display_name)
     name_known   = bool(display_name or info.get("name_asked"))
 
@@ -500,6 +523,9 @@ async def _reply(client: TelegramClient, chat_id: int, text: str, name: str,
         # AI недоступен — отвечаем fallback-сообщением чтобы клиент не висел без ответа
         reply = _FALLBACK_REPLIES.get(lang, _FALLBACK_REPLIES["ru"])
         log.warning("AI вернул None — использую fallback для chat_id=%d", chat_id)
+        # Уведомляем менеджера если AI упал (не чаще 1 раза в 10 мин на chat_id)
+        asyncio.create_task(_notify(client,
+            f"⚠️ AI API недоступен — отправлен fallback ответ клиенту ID {chat_id}"))
 
     # ── 15. Отправляем ответ ─────────────────────────────────────────────────
     await safe_send(client.send_message, chat_id, reply)
@@ -528,11 +554,17 @@ async def _reply(client: TelegramClient, chat_id: int, text: str, name: str,
 
 
 async def _update_summary_bg(chat_id: int):
+    # Используем реальный счётчик из БД — get_chat_history возвращает не более 30,
+    # что при len() % 10 == 0 давало бы False-positive для активных чатов (30 % 10 == 0 всегда True).
+    total = count_messages(chat_id)
+    if total < 6:
+        return
+    if total % 10 != 0:
+        return
     msgs = get_chat_history({}, chat_id, limit=30)
-    if len(msgs) >= 6 and len(msgs) % 10 == 0:
-        summary = await generate_summary(msgs)
-        if summary:
-            save_summary(chat_id, summary)
+    summary = await generate_summary(msgs)
+    if summary:
+        save_summary(chat_id, summary)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -745,7 +777,8 @@ async def main():
     # ── Инициализация ────────────────────────────────────────────────────────
     init_db()
     migrate_from_json()
-    setup_shutdown_handlers()
+    # Передаём текущий loop явно — избегаем asyncio.get_event_loop() в signal handler
+    setup_shutdown_handlers(asyncio.get_running_loop())
 
     # StringSession — для Docker/сервера (сессия из env-переменной TG_SESSION).
     # Если TG_SESSION не задана — используем локальный файл agent_session.session.

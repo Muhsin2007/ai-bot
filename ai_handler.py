@@ -766,7 +766,7 @@ async def generate_summary(messages: list) -> str:
         resp = await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: _ai.messages.create(
-                model="claude-haiku-4-5-20251001",
+                model="claude-haiku-4-5",
                 max_tokens=200,
                 messages=req,
             ),

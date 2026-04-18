@@ -34,15 +34,26 @@ BACKUP_INTERVAL_H = 6
 BACKUP_KEEP_DAYS  = 30
 
 
-def setup_shutdown_handlers():
-    """Перехватывает SIGINT (Ctrl+C) и SIGTERM (kill) для корректного завершения."""
+def setup_shutdown_handlers(loop=None):
+    """Перехватывает SIGINT (Ctrl+C) и SIGTERM (kill) для корректного завершения.
+
+    Принимает loop явно (передавать asyncio.get_running_loop() из main()).
+    Это гарантирует что signal-handler использует правильный event loop
+    и не зависит от asyncio.get_event_loop() в Python 3.10+.
+    """
+    # Захватываем loop один раз — при установке обработчиков, а не при сигнале
+    _loop = loop
+    if _loop is None:
+        try:
+            _loop = asyncio.get_running_loop()
+        except RuntimeError:
+            _loop = asyncio.get_event_loop()
 
     def _on_signal(sig, frame):
         log.info("Сигнал %s — завершаю работу...", sig)
-        # set() из потока сигнала — asyncio-safe через call_soon_threadsafe
+        # call_soon_threadsafe безопасен из потока сигнала
         try:
-            loop = asyncio.get_event_loop()
-            loop.call_soon_threadsafe(shutdown_event.set)
+            _loop.call_soon_threadsafe(shutdown_event.set)
         except RuntimeError:
             shutdown_event.set()
 
@@ -69,28 +80,35 @@ async def backup_worker():
         await _do_backup()
 
 
+def _do_backup_sync(path: str):
+    """Синхронная часть бэкапа — запускается в thread executor."""
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        for f in _BACKUP_FILES:
+            if os.path.exists(f):
+                z.write(f)
+    size_kb = os.path.getsize(path) // 1024
+
+    # Удаляем старше 30 дней
+    cutoff  = time.time() - BACKUP_KEEP_DAYS * 86400
+    removed = 0
+    for fname in os.listdir("backups"):
+        fpath = os.path.join("backups", fname)
+        if fname.endswith(".zip") and os.path.getmtime(fpath) < cutoff:
+            os.remove(fpath)
+            removed += 1
+    return size_kb, removed
+
+
 async def _do_backup():
+    """Создаёт ZIP-архив с БД и JSON-файлами. Файловые операции вынесены в thread."""
     ts   = datetime.now().strftime("%Y-%m-%d_%H-%M")
     path = f"backups/{ts}.zip"
     try:
-        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
-            for f in _BACKUP_FILES:
-                if os.path.exists(f):
-                    z.write(f)
-        size_kb = os.path.getsize(path) // 1024
+        # asyncio.to_thread не блокирует event loop во время архивации
+        size_kb, removed = await asyncio.to_thread(_do_backup_sync, path)
         log.info("Бэкап создан: %s (%d КБ)", path, size_kb)
-
-        # Удаляем старше 30 дней
-        cutoff  = time.time() - BACKUP_KEEP_DAYS * 86400
-        removed = 0
-        for fname in os.listdir("backups"):
-            fpath = os.path.join("backups", fname)
-            if fname.endswith(".zip") and os.path.getmtime(fpath) < cutoff:
-                os.remove(fpath)
-                removed += 1
         if removed:
             log.info("Удалено старых бэкапов: %d", removed)
-
     except Exception as e:
         log.error("Ошибка бэкапа: %s", e)
 
