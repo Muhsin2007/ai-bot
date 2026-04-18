@@ -185,6 +185,18 @@ def get_chat_history(_history: dict, chat_id: int, limit: int = 20) -> list:
     return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
 
 
+def get_chat_history_full(chat_id: int, limit: int = 200) -> list:
+    """История с временными метками — для команды /чат менеджера."""
+    with _raw_conn() as conn:
+        rows = conn.execute(
+            "SELECT role, content, ts FROM messages"
+            " WHERE chat_id = ? ORDER BY ts DESC LIMIT ?",
+            (chat_id, limit),
+        ).fetchall()
+    return [{"role": r["role"], "content": r["content"], "ts": r["ts"]}
+            for r in reversed(rows)]
+
+
 def has_messages(chat_id: int) -> bool:
     """Проверяет есть ли уже история для этого чата."""
     with _raw_conn() as conn:

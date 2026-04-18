@@ -808,18 +808,39 @@ def is_asking_photo(text: str) -> bool:
     return any(k in text.lower() for k in kw)
 
 
-def get_model_from_text(text: str) -> str | None:
+def get_all_models_from_text(text: str) -> list[str]:
+    """Возвращает ВСЕ модели упомянутые в тексте (без дублей).
+
+    Правила приоритета (порядок важен из-за подстрочных совпадений):
+      free+ → free_plus (до free чтобы не захватить «free» внутри «free+»)
+      free 318 / 318 → free_318
+      free / фри (без +/318) → free_318 (дефолт)
+    """
     t = text.lower()
+    found: list[str] = []
+
     if "taishan" in t or "тайшань" in t or "тайшан" in t:
-        return "taishan"
-    if "courage" in t or "куреж" in t or "кураж" in t:
-        return "courage"
-    if "m817" in t or "m-hero" in t or "м817" in t or "м-херо" in t:
-        return "m817"
+        found.append("taishan")
+    if "courage" in t or "куреж" in t or "кураж" in t or "карадж" in t or "кариж" in t:
+        found.append("courage")
+    if "m817" in t or "m-hero" in t or "м817" in t or "м-херо" in t or "mhero" in t:
+        found.append("m817")
+
+    # free_plus до free_318 — иначе «free+» захватит оба
     if "free+" in t or "free plus" in t or "фри+" in t or "фри плюс" in t:
-        return "free_plus"
-    if "free 318" in t or "318" in t or "фри 318" in t:
-        return "free_318"
-    if "free" in t or "фри" in t:
-        return "free_318"
-    return None
+        found.append("free_plus")
+    elif "free 318" in t or "фри 318" in t or (
+            "318" in t and "free" not in t.replace("318", "")):
+        # «318» без «free» рядом (напр. «Voyah 318»)
+        found.append("free_318")
+    elif "free" in t or "фри" in t:
+        # Просто «free» — подразумеваем free_318 как более популярную
+        found.append("free_318")
+
+    return found
+
+
+def get_model_from_text(text: str) -> str | None:
+    """Возвращает первую найденную модель (обратно совместима с прежней сигнатурой)."""
+    models = get_all_models_from_text(text)
+    return models[0] if models else None

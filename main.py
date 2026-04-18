@@ -17,7 +17,7 @@ import time
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from telethon.tl.types import User
+from telethon.tl.types import User, MessageMediaContact
 from telethon.tl.functions.messages import SendMediaRequest
 from telethon.tl.types import InputMediaVenue, InputGeoPoint
 
@@ -26,7 +26,7 @@ from safe_telethon import safe_send
 from shutdown import shutdown_event, setup_shutdown_handlers, backup_worker, finalize
 from storage_db import (
     init_db, migrate_from_json,
-    add_message, get_chat_history, has_messages, count_messages,
+    add_message, get_chat_history, get_chat_history_full, has_messages, count_messages,
     get_client_info, set_client_info, get_all_clients,
     get_client_stage, set_client_stage,
     load_prices, save_prices,
@@ -40,7 +40,8 @@ from ai_handler import (
     detect_optout, detect_buying_intent, is_greeting_only,
     OPTOUT_FAREWELL,
     get_followup_message,
-    is_asking_price, is_asking_location, is_asking_photo, get_model_from_text,
+    is_asking_price, is_asking_location, is_asking_photo,
+    get_model_from_text, get_all_models_from_text,
 )
 
 load_dotenv()
@@ -97,6 +98,9 @@ _tg_loaded:     set[int]         = set()  # chat_id для которых уже
 _td_state: dict[int, dict] = {}   # состояние флоу тест-драйва по chat_id
 _TD_FLOW_TIMEOUT = 30 * 60        # сек — заброшенный флоу автоматически сбрасывается
 
+_active_model: dict[int, tuple] = {}   # chat_id → (model_key, timestamp_last_mentioned)
+_ACTIVE_MODEL_TTL = 30 * 60           # сек — активная модель сбрасывается после 30 мин молчания
+
 me_id:       int   = 0
 _startup_ts: float = 0.0
 
@@ -138,6 +142,129 @@ def _cleanup_old_timestamps():
 def _is_opted_out(chat_id: int) -> bool:
     """Клиент попросил не писать — никогда не отвечать."""
     return bool(get_client_info(chat_id).get("opted_out"))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PHONE VALIDATION
+# ══════════════════════════════════════════════════════════════════════════════
+
+_UZ_MOBILE_PREFIXES = frozenset({
+    "90", "91", "93", "94", "95", "97", "98", "99",   # мобильные операторы UZ
+    "33", "55", "77", "88",                             # виртуальные/MVNO
+    "71",                                               # Ташкент городской
+})
+
+
+def validate_phone(text: str) -> tuple[bool, str]:
+    """
+    Валидирует и нормализует номер телефона.
+    Возвращает (is_valid, e164_normalized).
+    normalized — пустая строка если невалидно.
+
+    Поддерживает форматы:
+      +998901234567  →  +998901234567
+      998901234567   →  +998901234567
+      0901234567     →  +998901234567
+      901234567      →  +998901234567  (если UZ-префикс)
+      +7 705 ...     →  +7705...       (казахстанский/российский)
+    """
+    digits = re.sub(r"[\s\-\(\)\+\.]", "", text.strip())
+    if not digits or not digits.isdigit():
+        return False, ""
+
+    # +998 XX XXXXXXX → 12 цифр
+    if digits.startswith("998") and len(digits) == 12:
+        return True, f"+{digits}"
+
+    # 0XX XXXXXXX → 10 цифр (с лидирующим нулём)
+    if digits.startswith("0") and len(digits) == 10:
+        return True, f"+998{digits[1:]}"
+
+    # XX XXXXXXX → 9 цифр (местный без 0), только UZ-префиксы
+    if len(digits) == 9 and digits[:2] in _UZ_MOBILE_PREFIXES:
+        return True, f"+998{digits}"
+
+    # Международный формат (не UZ) — принимаем 10-15 цифр
+    if 10 <= len(digits) <= 15:
+        return True, f"+{digits}"
+
+    return False, ""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MODEL CONTEXT TRACKING
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _update_active_model(chat_id: int, model: str):
+    """Запоминает какую модель клиент упомянул последней."""
+    _active_model[chat_id] = (model, time.time())
+
+
+def _get_active_model(chat_id: int) -> str | None:
+    """Возвращает активную модель если она упоминалась в последние 30 мин."""
+    entry = _active_model.get(chat_id)
+    if not entry:
+        return None
+    model, ts = entry
+    if time.time() - ts > _ACTIVE_MODEL_TTL:
+        _active_model.pop(chat_id, None)
+        return None
+    return model
+
+
+def _resolve_model(text: str, chat_id: int, messages: list) -> str | None:
+    """
+    Определяет модель которая интересует клиента — 4 уровня приоритета:
+      1. Явное упоминание в текущем сообщении (одна модель)
+      2. Активная модель в памяти (< 30 мин с момента упоминания)
+      3. Профиль клиента в БД (info["model"])
+      4. Поиск по последним 10 сообщениям клиента в истории
+    Если в тексте 2+ модели — клиент сравнивает, возвращаем None.
+    """
+    # 1. Текущее сообщение
+    all_in_text = get_all_models_from_text(text)
+    if len(all_in_text) == 1:
+        return all_in_text[0]
+    if len(all_in_text) > 1:
+        # Несколько моделей → сравнение, не запоминаем
+        return None
+
+    # 2. Активная память (недавно упомянутая)
+    active = _get_active_model(chat_id)
+    if active:
+        return active
+
+    # 3. БД — профиль клиента
+    info = get_client_info(chat_id)
+    if info.get("model"):
+        return info["model"]
+
+    # 4. История — ищем в последних 10 сообщениях клиента
+    for msg in reversed(messages[-10:]):
+        if msg.get("role") == "user":
+            found = get_all_models_from_text(msg.get("content", ""))
+            if len(found) == 1:
+                return found[0]
+
+    return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MESSAGE HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _split_message(text: str, limit: int = 4000) -> list[str]:
+    """Разбивает длинный текст на части не длиннее limit символов."""
+    parts = []
+    while len(text) > limit:
+        split_at = text.rfind("\n", 0, limit)
+        if split_at == -1:
+            split_at = limit
+        parts.append(text[:split_at])
+        text = text[split_at:].lstrip("\n")
+    if text:
+        parts.append(text)
+    return parts
 
 
 async def _get_name(entity) -> str:
@@ -333,7 +460,31 @@ async def _handle_testdrive_step(client: TelegramClient, chat_id: int,
         return True
 
     if step == "ask_phone":
-        state["phone"] = text
+        # ── Валидация номера телефона ────────────────────────────────────────
+        is_valid, normalized = validate_phone(text)
+
+        if not is_valid:
+            attempts = state.get("phone_attempts", 0) + 1
+            state["phone_attempts"] = attempts
+
+            if attempts >= 3:
+                # После 3 неудач — принимаем как есть, не блокируем запись
+                normalized = text
+                log.warning("Принят невалидный телефон после %d попыток [%d]: %s",
+                            attempts, chat_id, text)
+            else:
+                err = {
+                    "ru": f"Похоже это не номер телефона. Введите в формате +998901234567 (попытка {attempts}/3).",
+                    "uz": f"Bu telefon raqam emas. +998901234567 formatida kiriting ({attempts}/3 urinish).",
+                    "en": f"Doesn't look like a phone number. Try +998901234567 format (attempt {attempts}/3).",
+                }
+                q = err.get(lang, err["ru"])
+                await safe_send(client.send_message, chat_id, q)
+                add_message({}, chat_id, "assistant", q)
+                _mark_sent(chat_id)
+                return True   # шаг не завершён, ждём правильного ввода
+
+        state["phone"] = normalized
         info           = get_client_info(chat_id)
         model_key      = info.get("model", state.get("model", ""))
         model_name     = model_key.replace("_", " ").upper() if model_key else "не указана"
@@ -415,7 +566,7 @@ async def _reply(client: TelegramClient, chat_id: int, text: str, name: str,
     asking_location  = is_asking_location(text)
     asking_photo     = is_asking_photo(text)
     asking_testdrive = detect_testdrive(text)
-    model_key        = get_model_from_text(text)
+    model_key        = _resolve_model(text, chat_id, messages)
     competitor_key   = detect_competitor(text)
     has_tradein      = detect_tradein(text)
     buying_intent    = detect_buying_intent(text)
@@ -430,8 +581,15 @@ async def _reply(client: TelegramClient, chat_id: int, text: str, name: str,
 
     if gender and not info.get("gender"):
         set_client_info(chat_id, gender=gender)
-    if model_key and not info.get("model"):
-        set_client_info(chat_id, model=model_key)
+    if model_key:
+        _update_active_model(chat_id, model_key)
+        # Явное упоминание в текущем тексте → обновляем даже если модель была другая
+        # Из контекста (история/память) → сохраняем только если модель не задана
+        explicit = get_all_models_from_text(text)
+        if len(explicit) == 1:
+            set_client_info(chat_id, model=model_key)
+        elif not info.get("model"):
+            set_client_info(chat_id, model=model_key)
     if get_client_stage(chat_id) == "new":
         set_client_stage(chat_id, "interested")
 
@@ -713,6 +871,55 @@ async def _cmd_testdrives(client: TelegramClient, chat_id: int):
     await safe_send(client.send_message, chat_id, "\n".join(lines))
 
 
+async def _cmd_chat_history(client: TelegramClient, manager_id: int,
+                            target_id: int, page: int = 0):
+    """
+    /чат ID [страница] — показывает историю переписки с клиентом.
+    Постраничный вывод по 20 сообщений, с временными метками.
+    """
+    PAGE_SIZE = 20
+    msgs = get_chat_history_full(target_id, limit=200)
+
+    if not msgs:
+        await safe_send(client.send_message, manager_id,
+            f"❌ История пуста или клиент ID {target_id} не найден в базе.")
+        return
+
+    info  = get_client_info(target_id)
+    name  = info.get("name") or f"ID {target_id}"
+    stage = info.get("stage", "new")
+    model = (info.get("model") or "?").replace("_", " ").upper()
+
+    total_pages = max(1, (len(msgs) + PAGE_SIZE - 1) // PAGE_SIZE)
+    page        = max(0, min(page, total_pages - 1))
+    chunk       = msgs[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
+
+    lines = [
+        f"💬 {name}  |  {model}  |  стадия: {stage}",
+        f"Сообщений: {len(msgs)}  ·  Стр. {page + 1}/{total_pages}\n",
+    ]
+
+    for m in chunk:
+        icon   = "👤" if m["role"] == "user" else "🤖"
+        ts_str = time.strftime("%d.%m %H:%M", time.localtime(m["ts"]))
+        content = m["content"].replace("\n", " ")[:280]
+        lines.append(f"{icon} [{ts_str}]  {content}")
+
+    # Навигация
+    if total_pages > 1:
+        lines.append("")
+        nav = []
+        if page > 0:
+            nav.append(f"◀ /чат {target_id} {page - 1}")
+        if page < total_pages - 1:
+            nav.append(f"▶ /чат {target_id} {page + 1}")
+        lines.append("  ·  ".join(nav))
+
+    full_text = "\n".join(lines)
+    for part in _split_message(full_text):
+        await safe_send(client.send_message, manager_id, part)
+
+
 async def _cmd_prices(client: TelegramClient, chat_id: int, text: str):
     """Просмотр и обновление цен. Использование: /цены [новый текст]"""
     parts = text.split(None, 1)
@@ -805,6 +1012,18 @@ async def main():
                     _processed_ids.discard(old_id)
 
             text = event.raw_text
+
+            # Шаринг контакта через Telegram (кнопка «Поделиться номером»)
+            # — перехватываем только если клиент в шаге ask_phone тест-драйва
+            if not text:
+                if (isinstance(event.message.media, MessageMediaContact)
+                        and event.chat_id in _td_state
+                        and _td_state[event.chat_id].get("step") == "ask_phone"):
+                    raw_phone = event.message.media.phone_number or ""
+                    text = f"+{raw_phone}" if raw_phone and not raw_phone.startswith("+") else raw_phone
+                else:
+                    return
+
             if not text:
                 return
 
@@ -839,6 +1058,21 @@ async def main():
                 await _cmd_clients(client, chat_id)
             elif text.startswith("/тестдрайвы"):
                 await _cmd_testdrives(client, chat_id)
+            elif text.startswith("/чат"):
+                parts = text.split()
+                if len(parts) < 2:
+                    await safe_send(client.send_message, me_id,
+                        "Использование: /чат 123456789 [страница]\n"
+                        "Пример: /чат 123456789\n"
+                        "Следующая страница: /чат 123456789 1")
+                else:
+                    try:
+                        target_id = int(parts[1])
+                        page      = int(parts[2]) if len(parts) >= 3 else 0
+                        await _cmd_chat_history(client, me_id, target_id, page)
+                    except ValueError:
+                        await safe_send(client.send_message, me_id,
+                            "❌ ID клиента должен быть числом. Пример: /чат 123456789")
             elif text.startswith("@") or re.match(r"\+?[\d][\d\s\-]{7,14}", text):
                 await _handle_saved_messages(client, event)
             return
