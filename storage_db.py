@@ -113,8 +113,10 @@ def init_db():
         with _raw_conn() as conn:
             conn.execute("ALTER TABLE clients ADD COLUMN opted_out INTEGER DEFAULT 0")
         log.info("Добавлен столбец opted_out")
-    except Exception:
-        pass  # Столбец уже есть
+    except sqlite3.OperationalError as e:
+        if "duplicate column name" not in str(e).lower():
+            log.warning("ALTER TABLE clients (opted_out): %s", e)
+        # иначе — столбец уже есть, всё нормально
 
     log.info("БД инициализирована: %s", DB_FILE)
 
@@ -191,6 +193,16 @@ def has_messages(chat_id: int) -> bool:
             (chat_id,),
         ).fetchone()
     return (row["cnt"] or 0) > 0
+
+
+def count_messages(chat_id: int) -> int:
+    """Возвращает полное количество сообщений для чата (без лимита)."""
+    with _raw_conn() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM messages WHERE chat_id = ?",
+            (chat_id,),
+        ).fetchone()
+    return row["cnt"] or 0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
