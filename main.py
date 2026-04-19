@@ -85,9 +85,9 @@ MODEL_PHOTOS: dict[str, list[str]] = {
 
 # Fallback-ответ если Claude API временно недоступен
 _FALLBACK_REPLIES = {
-    "ru": "Одну секунду, уточняю информацию. Если срочно — позвоните нам: +998 95 004 97 49",
-    "uz": "Bir daqiqa, ma'lumotni aniqlayman. Shoshilinch bo'lsa: +998 95 004 97 49",
-    "en": "One moment please. For urgent matters call us: +998 95 004 97 49",
+    "ru": "Одну секунду, уточняю информацию. Если срочно — позвоните нам: +998 98 444 05 44",
+    "uz": "Bir daqiqa, ma'lumotni aniqlayman. Shoshilinch bo'lsa: +998 98 444 05 44",
+    "en": "One moment please. For urgent matters call us: +998 98 444 05 44",
 }
 
 
