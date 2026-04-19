@@ -32,6 +32,8 @@ from storage_db import (
     load_prices, save_prices,
     save_summary,
     save_appointment, get_upcoming_appointments,
+    save_training_qa, get_all_training_qa, delete_training_qa, count_training_qa,
+    set_conversation_label, get_conversation_label,
 )
 from ai_handler import (
     get_ai_reply, generate_summary, detect_language, detect_gender,
@@ -43,6 +45,8 @@ from ai_handler import (
     is_asking_price, is_asking_location, is_asking_photo,
     get_model_from_text, get_all_models_from_text,
     detect_hesitation, extract_facts,
+    detect_post_purchase, extract_conversation_patterns,
+    interpret_sticker,
 )
 
 load_dotenv()
@@ -378,25 +382,53 @@ async def _send_location(client: TelegramClient, chat_id: int):
 
 async def _send_price(client: TelegramClient, chat_id: int):
     """
-    Пересылает прайс-лист из канала @deeeepal (сообщение #3).
-    Fallback: текстовый прайс. Ровно ОДНО сообщение в обоих случаях.
+    Отправляет прайс-лист клиенту напрямую — БЕЗ пересылки и атрибуции канала.
+    Клиент видит сообщение как отправленное непосредственно Воей, а не из канала.
+
+    Алгоритм:
+      1. Получаем сообщение из канала через get_messages (не forward_messages)
+      2. Если есть фото/документ — re-upload через send_file (не forward)
+      3. Если только текст — send_message
+      4. Fallback: текстовый прайс из БД
     """
     try:
         channel = await client.get_entity(PRICE_CHANNEL)
-        result = await safe_send(
-            client.forward_messages,
-            entity=chat_id,
-            messages=PRICE_MSG_ID,
-            from_peer=channel,
-        )
-        if result is not None:
-            log.info("Прайс переслан из @%s/%d -> %d", PRICE_CHANNEL, PRICE_MSG_ID, chat_id)
-            return
-    except Exception as e:
-        log.warning("Прайс: канал недоступен (%s) — отправляю текст", e)
+        msgs    = await client.get_messages(channel, ids=[PRICE_MSG_ID])
+        msg     = msgs[0] if msgs else None
 
-    # Fallback — текст
+        if msg:
+            caption = (msg.message or "").strip()
+
+            if msg.photo:
+                result = await safe_send(
+                    client.send_file, chat_id, msg.photo,
+                    caption=caption,
+                )
+                if result is not None:
+                    log.info("Прайс (фото) отправлен напрямую -> %d", chat_id)
+                    return
+
+            elif msg.document:
+                result = await safe_send(
+                    client.send_file, chat_id, msg.document,
+                    caption=caption,
+                )
+                if result is not None:
+                    log.info("Прайс (документ) отправлен напрямую -> %d", chat_id)
+                    return
+
+            elif msg.message:
+                result = await safe_send(client.send_message, chat_id, msg.message)
+                if result is not None:
+                    log.info("Прайс (текст из канала) отправлен -> %d", chat_id)
+                    return
+
+    except Exception as e:
+        log.warning("Прайс: не удалось получить из канала (%s) — отправляю текст", e)
+
+    # Fallback — текстовый прайс из БД (всегда актуален)
     await safe_send(client.send_message, chat_id, load_prices())
+    log.info("Прайс (fallback текст) отправлен -> %d", chat_id)
 
 
 async def _send_model_photos(client: TelegramClient, chat_id: int, model_key: str):
@@ -525,7 +557,8 @@ def _start_testdrive_flow(chat_id: int, lang: str) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def _reply(client: TelegramClient, chat_id: int, text: str, name: str,
-                 lang: str = "ru", msg_ts: float = 0.0):
+                 lang: str = "ru", msg_ts: float = 0.0,
+                 extra_context_override: str = ""):
 
     # ── 0. Opt-out проверка — НИКОГДА не отвечаем ──────────────────────────
     if _is_opted_out(chat_id):
@@ -540,8 +573,26 @@ async def _reply(client: TelegramClient, chat_id: int, text: str, name: str,
     # ── 2. Загружаем TG историю при первом контакте ─────────────────────────
     await _load_tg_history(client, chat_id)
 
-    # ── 3. Обнаруживаем opt-out в тексте сообщения ──────────────────────────
-    if detect_optout(text):
+    # ── 3. Ранняя загрузка профиля клиента (нужна для шагов 3.1 и 3.2) ──────
+    _early_info = get_client_info(chat_id)
+
+    # ── 3.1. Пост-продажный запрос → переадресация живому менеджеру ─────────
+    # Проверяем ДО optout, чтобы купивший клиент не получил прощальное сообщение.
+    if detect_post_purchase(text, _early_info):
+        routing_msg = "Передал ваш вопрос менеджеру."
+        add_message({}, chat_id, "user", text)
+        add_message({}, chat_id, "assistant", routing_msg)
+        await safe_send(client.send_message, chat_id, routing_msg)
+        _mark_sent(chat_id)
+        log.info("🔧 Пост-продажа -> %s (%d): %s", name, chat_id, text[:60])
+        asyncio.create_task(_notify(client,
+            f"🔧 ПОСТ-ПРОДАЖА: {name} (ID: {chat_id})\n"
+            f"Клиент уже купил и задаёт вопрос поддержки:\n«{text[:300]}»"))
+        return
+
+    # ── 3.2. Обнаруживаем opt-out в тексте сообщения ────────────────────────
+    # Пропускаем проверку для известных покупателей — они не «уходят», а просят помощь.
+    if not _early_info.get("purchased") and detect_optout(text):
         farewell = OPTOUT_FAREWELL.get(lang, OPTOUT_FAREWELL["ru"])
         set_client_info(chat_id, opted_out=True)
         add_message({}, chat_id, "user", text)
@@ -675,6 +726,9 @@ async def _reply(client: TelegramClient, chat_id: int, text: str, name: str,
             "конкретную ставку назови исходя из возможного взноса.]"
         )
 
+    if extra_context_override:
+        extra_parts.insert(0, extra_context_override)
+
     extra_context = "\n".join(extra_parts)
 
     # ── 10. Тест-драйв → отдельный флоу ────────────────────────────────────
@@ -699,17 +753,62 @@ async def _reply(client: TelegramClient, chat_id: int, text: str, name: str,
         log.info("Пропуск (менеджер ответил пока думали) -> %d", chat_id)
         return
 
-    # ── 13. Прайс → пересылаем из канала (ONE message, no AI needed) ────────
+    # ── 13. Прайс → напрямую (без атрибуции канала) + квалификация лида ─────
     if asking_price:
-        await _send_price(client, chat_id)
-        add_message({}, chat_id, "assistant", "[Прайс-лист отправлен]")
-        _mark_sent(chat_id)
+        # Dedup: не отправляем прайс повторно если уже был в этом диалоге
+        price_sent_before = any(
+            "[Прайс-лист отправлен]" in m.get("content", "")
+            for m in messages
+        )
+        if not price_sent_before:
+            await _send_price(client, chat_id)
+            add_message({}, chat_id, "assistant", "[Прайс-лист отправлен]")
+            _mark_sent(chat_id)
+
         if is_new:
             set_client_info(chat_id, greeted=True)
-        # Если одновременно просят и прайс и локацию
+
         if asking_location:
             await asyncio.sleep(1)
             await _send_location(client, chat_id)
+
+        # ── Follow-up: квалифицируем лид после прайса ───────────────────────
+        # Выбираем вопрос в зависимости от того, что уже известно о клиенте
+        known_model  = info.get("model") or model_key
+        known_budget = info.get("hesitation_score", 0) > 0.3  # proxy: обсуждал цену
+
+        if known_model:
+            follow_hint = (
+                f"[Прайс только что отправлен. Модель клиента: {known_model}. "
+                f"Задай ОДИН вопрос: бюджет, сроки или способ оплаты. "
+                f"Не повторяй цены. Одно предложение.]"
+            )
+        else:
+            follow_hint = (
+                "[Прайс только что отправлен. Задай ОДИН вопрос: "
+                "какая модель интересует больше — Courage или Free. "
+                "Не повторяй цены. Одно предложение.]"
+            )
+
+        await asyncio.sleep(random.uniform(3, 5))  # пауза — прайс должен дойти первым
+
+        fresh_history = get_chat_history({}, chat_id, limit=10)
+        follow_up = await get_ai_reply(
+            fresh_history,
+            chat_id=chat_id,
+            name=display_name,
+            lang=lang,
+            extra_context=follow_hint,
+            is_new_client=is_new,
+            name_known=name_known,
+            gender=gender,
+        )
+        if follow_up:
+            await safe_send(client.send_message, chat_id, follow_up)
+            add_message({}, chat_id, "assistant", follow_up)
+            _mark_sent(chat_id)
+            log.info("Прайс + follow-up -> %d | %s", chat_id, follow_up[:60])
+
         asyncio.create_task(_update_summary_bg(chat_id))
         return
 
@@ -819,8 +918,7 @@ async def reply_to_missed(client: TelegramClient):
                     continue
 
                 unread_msgs.reverse()
-                combined = " | ".join(m.text for m in unread_msgs)
-                last_ts  = unread_msgs[-1].date.timestamp()
+                last_ts = unread_msgs[-1].date.timestamp()
 
                 if await _already_answered(client, chat_id, since_ts=last_ts):
                     continue
@@ -831,10 +929,12 @@ async def reply_to_missed(client: TelegramClient):
                 except Exception:
                     name = "Клиент"
 
-                lang = detect_language(combined)
+                # Объединяем все пропущенные сообщения в один контекст
+                combined = " | ".join(m.text for m in unread_msgs)
+                lang     = detect_language(combined)
 
                 await _load_tg_history(client, chat_id)
-                # Добавляем только уникальные сообщения
+                # Сохраняем только уникальные пропущенные сообщения
                 recent_texts = {m.get("content") for m in get_chat_history({}, chat_id, limit=5)}
                 for m in unread_msgs:
                     if m.text not in recent_texts:
@@ -844,8 +944,22 @@ async def reply_to_missed(client: TelegramClient):
                 if not info.get("name") and name != "Клиент":
                     set_client_info(chat_id, name=name, lang=lang)
 
-                log.info("Пропущено: %s (%d): %s", name, chat_id, combined[:60])
-                await _reply(client, chat_id, combined, name, lang, msg_ts=0.0)
+                # Контекстная подсказка AI для множественных сообщений
+                missed_context = ""
+                if len(unread_msgs) > 1:
+                    missed_context = (
+                        f"[ПРОПУЩЕНО {len(unread_msgs)} СООБЩЕНИЯ пока бот был недоступен. "
+                        f"Клиент написал их подряд: {combined[:400]}. "
+                        f"Ответь на все вопросы в одном ответе естественно, "
+                        f"как будто разговор не прерывался. Не упоминай паузу.]"
+                    )
+                    log.info("Пропущено %d сообщ.: %s (%d): %s",
+                             len(unread_msgs), name, chat_id, combined[:60])
+                else:
+                    log.info("Пропущено: %s (%d): %s", name, chat_id, combined[:60])
+
+                await _reply(client, chat_id, combined, name, lang,
+                             msg_ts=0.0, extra_context_override=missed_context)
                 count += 1
                 await asyncio.sleep(random.uniform(2, 4))
 
@@ -983,6 +1097,227 @@ async def _cmd_prices(client: TelegramClient, chat_id: int, text: str):
     await safe_send(client.send_message, chat_id, "✅ Цены обновлены.")
 
 
+async def _cmd_knowledge(client: TelegramClient, chat_id: int, text: str):
+    """
+    /знание                    — статистика базы знаний
+    /знание список             — все Q&A пары (до 20)
+    /знание удалить ID         — удалить пару по номеру
+    """
+    parts = text.split(None, 2)
+    sub   = parts[1].lower() if len(parts) > 1 else ""
+
+    if sub == "список":
+        pairs = get_all_training_qa(limit=20)
+        if not pairs:
+            await safe_send(client.send_message, chat_id,
+                "📭 База знаний пуста. Добавь: /обучение вопрос | ответ")
+            return
+        lines = [f"📚 База знаний ({len(pairs)} записей):\n"]
+        for p in pairs:
+            ts = time.strftime("%d.%m", time.localtime(p["created_at"]))
+            lines.append(f"[{p['id']}] {ts} {p['source']}\n"
+                         f"В: {p['question'][:80]}\n"
+                         f"О: {p['answer'][:120]}\n")
+        for part in _split_message("\n".join(lines)):
+            await safe_send(client.send_message, chat_id, part)
+        return
+
+    if sub == "удалить":
+        if len(parts) < 3:
+            await safe_send(client.send_message, chat_id,
+                "❌ Укажи ID: /знание удалить 42")
+            return
+        try:
+            qa_id = int(parts[2].strip())
+            ok    = delete_training_qa(qa_id)
+            msg   = f"✅ Запись #{qa_id} удалена." if ok else f"❌ Запись #{qa_id} не найдена."
+            await safe_send(client.send_message, chat_id, msg)
+        except ValueError:
+            await safe_send(client.send_message, chat_id, "❌ ID должен быть числом.")
+        return
+
+    # По умолчанию — статистика
+    total = count_training_qa()
+    await safe_send(client.send_message, chat_id,
+        f"📚 База знаний: {total} записей\n\n"
+        f"Команды:\n"
+        f"/знание список — показать все\n"
+        f"/знание удалить ID — удалить запись\n"
+        f"/обучение вопрос | ответ — добавить\n"
+        f"/импорт ID — извлечь паттерны из диалога")
+
+
+async def _cmd_add_training(client: TelegramClient, chat_id: int, text: str):
+    """
+    /обучение вопрос | ответ
+    Добавляет пару вопрос-ответ в базу знаний.
+    Разделитель: ' | ' (пробел-труба-пробел).
+    """
+    # Убираем команду из начала
+    body = text[len("/обучение"):].strip()
+    if "|" not in body:
+        await safe_send(client.send_message, chat_id,
+            "❌ Формат: /обучение вопрос | ответ\n\n"
+            "Пример:\n/обучение Дорого! | Понимаю, давайте посчитаем кредит — "
+            "при взносе 30% платёж всего X сум в месяц.")
+        return
+    parts    = body.split("|", 1)
+    question = parts[0].strip()
+    answer   = parts[1].strip()
+    if len(question) < 5 or len(answer) < 5:
+        await safe_send(client.send_message, chat_id,
+            "❌ Вопрос и ответ должны быть не менее 5 символов.")
+        return
+    qa_id = save_training_qa(question, answer, source="manual")
+    await safe_send(client.send_message, chat_id,
+        f"✅ Добавлено в базу знаний (ID: {qa_id})\n\n"
+        f"В: {question}\nО: {answer}")
+    log.info("База знаний: добавлена пара #%d", qa_id)
+
+
+async def _cmd_mark_success(client: TelegramClient, chat_id: int, text: str):
+    """
+    /успех ID [примечание]
+    Помечает диалог как успешный и автоматически извлекает обучающие паттерны.
+    Использовать для диалогов: сделка закрыта / лид передан / менеджер доволен.
+    """
+    parts = text.split(None, 2)
+    if len(parts) < 2:
+        await safe_send(client.send_message, chat_id,
+            "Использование: /успех ID [примечание]\n"
+            "Пример: /успех 123456789 закрыли сделку Free 318")
+        return
+    try:
+        target_id = int(parts[1])
+    except ValueError:
+        await safe_send(client.send_message, chat_id, "❌ ID должен быть числом.")
+        return
+
+    note = parts[2] if len(parts) > 2 else ""
+    set_conversation_label(target_id, "success", note)
+
+    info  = get_client_info(target_id)
+    name  = info.get("name") or f"ID {target_id}"
+    model = (info.get("model") or "?").replace("_", " ").upper()
+
+    await safe_send(client.send_message, chat_id,
+        f"✅ Диалог {name} ({target_id}) помечен как успешный.\n"
+        f"Извлекаю обучающие паттерны...")
+
+    msgs    = get_chat_history_full(target_id, limit=100)
+    msgs_ai = [{"role": m["role"], "content": m["content"]} for m in msgs]
+    count   = await extract_conversation_patterns(msgs_ai, target_id)
+
+    await safe_send(client.send_message, chat_id,
+        f"📚 Извлечено {count} паттернов из диалога {name} ({model}).\n"
+        f"Они уже доступны боту как база знаний.")
+
+
+async def _cmd_mark_deal(client: TelegramClient, chat_id: int, text: str):
+    """
+    /сделка ID [модель]
+    Помечает клиента как купившего. После этого любой его вопрос про
+    сервис/гарантию/документы → «Передал вопрос менеджеру.»
+    """
+    parts = text.split(None, 2)
+    if len(parts) < 2:
+        await safe_send(client.send_message, chat_id,
+            "Использование: /сделка ID [модель]\n"
+            "Пример: /сделка 123456789 Voyah Free 318")
+        return
+    try:
+        target_id = int(parts[1])
+    except ValueError:
+        await safe_send(client.send_message, chat_id, "❌ ID должен быть числом.")
+        return
+
+    model_note = parts[2] if len(parts) > 2 else ""
+    set_client_info(target_id, purchased=True, stage="deal")
+    if model_note:
+        set_client_info(target_id, model=model_note.lower().replace(" ", "_"))
+
+    info = get_client_info(target_id)
+    name = info.get("name") or f"ID {target_id}"
+
+    set_conversation_label(target_id, "success", f"deal:{model_note}")
+    await safe_send(client.send_message, chat_id,
+        f"🎉 {name} ({target_id}) — сделка зафиксирована.\n"
+        f"Клиент переведён в режим пост-продажи. "
+        f"Любой сервисный вопрос будет переадресован менеджеру.")
+    log.info("Сделка: %s (%d) модель=%s", name, target_id, model_note)
+
+
+async def _cmd_import_conversation(client: TelegramClient, chat_id: int, text: str):
+    """
+    /импорт ID [примечание]
+    Извлекает паттерны продаж из указанного диалога и добавляет в базу знаний.
+    Используй только для диалогов @Deepaluz, @Muhsin1906 или других успешных переписок.
+    """
+    parts = text.split(None, 2)
+    if len(parts) < 2:
+        await safe_send(client.send_message, chat_id,
+            "Использование: /импорт ID [примечание]\n"
+            "Пример: /импорт 123456789 диалог Deepaluz\n\n"
+            "Бот извлечёт лучшие продающие паттерны из этого диалога.")
+        return
+    try:
+        target_id = int(parts[1])
+    except ValueError:
+        await safe_send(client.send_message, chat_id, "❌ ID должен быть числом.")
+        return
+
+    note = parts[2] if len(parts) > 2 else ""
+    set_conversation_label(target_id, "success", note or "imported")
+
+    msgs    = get_chat_history_full(target_id, limit=100)
+    if not msgs:
+        await safe_send(client.send_message, chat_id,
+            f"❌ История диалога {target_id} пуста в базе.\n"
+            f"Сначала убедись что клиент писал боту — история загружается при первом контакте.")
+        return
+
+    await safe_send(client.send_message, chat_id,
+        f"⏳ Анализирую диалог {target_id} ({len(msgs)} сообщений)...")
+
+    msgs_ai = [{"role": m["role"], "content": m["content"]} for m in msgs]
+    count   = await extract_conversation_patterns(msgs_ai, target_id)
+
+    if count > 0:
+        await safe_send(client.send_message, chat_id,
+            f"✅ Импортировано {count} паттернов из диалога {target_id}.\n"
+            f"База знаний обновлена — бот сразу использует их в ответах.")
+    else:
+        await safe_send(client.send_message, chat_id,
+            f"⚠️ Не удалось извлечь паттерны из диалога {target_id}.\n"
+            f"Диалог слишком короткий или без продающих техник. "
+            f"Добавь вручную: /обучение вопрос | ответ")
+
+
+async def _cmd_help(client: TelegramClient, chat_id: int):
+    """Показывает все доступные команды менеджера."""
+    await safe_send(client.send_message, chat_id,
+        "📋 Команды Воя-бота (Избранные):\n\n"
+        "👥 Клиенты:\n"
+        "/клиенты — воронка по стадиям\n"
+        "/тестдрайвы — предстоящие записи\n"
+        "/чат ID [стр] — история переписки\n"
+        "/сделка ID [модель] — зафиксировать покупку\n"
+        "/успех ID [примечание] — отметить успешный диалог\n\n"
+        "📚 База знаний:\n"
+        "/знание — статистика\n"
+        "/знание список — показать Q&A пары\n"
+        "/знание удалить ID — удалить пару\n"
+        "/обучение вопрос | ответ — добавить Q&A\n"
+        "/импорт ID — извлечь паттерны из диалога\n\n"
+        "💰 Прайс:\n"
+        "/цены — текущий прайс\n"
+        "/цены <текст> — обновить\n\n"
+        "✉️ Написать клиенту:\n"
+        "@username текст\n"
+        "+998901234567 текст"
+    )
+
+
 async def _handle_saved_messages(client: TelegramClient, event):
     """
     Ручная отправка клиенту из Избранных:
@@ -1063,25 +1398,51 @@ async def main():
                 for old_id in sorted(_processed_ids)[:1000]:
                     _processed_ids.discard(old_id)
 
-            text = event.raw_text
+            text    = event.raw_text or ""
+            chat_id = event.chat_id
+            name    = await _get_name_from_event(event)
 
-            # Шаринг контакта через Telegram (кнопка «Поделиться номером»)
-            # — перехватываем только если клиент в шаге ask_phone тест-драйва
+            # ── Медиа-сообщения без текста ─────────────────────────────────
             if not text:
-                if (isinstance(event.message.media, MessageMediaContact)
-                        and event.chat_id in _td_state
-                        and _td_state[event.chat_id].get("step") == "ask_phone"):
-                    raw_phone = event.message.media.phone_number or ""
-                    text = f"+{raw_phone}" if raw_phone and not raw_phone.startswith("+") else raw_phone
-                else:
+                # Стикер → интерпретируем как сигнал намерения
+                sticker = getattr(event.message, "sticker", None)
+                if sticker is not None:
+                    emoji = ""
+                    for attr in (getattr(sticker, "attributes", None) or []):
+                        if getattr(attr, "alt", None):
+                            emoji = attr.alt
+                            break
+                    signal, synthetic_text, ai_hint = interpret_sticker(emoji)
+                    log.info("<- STICKER %s [%s] %s (%d)",
+                             emoji or "?", signal, name, chat_id)
+
+                    # Обновляем данные клиента (без перезаписи lang — нет текста)
+                    info    = get_client_info(chat_id)
+                    lang    = info.get("lang") or "ru"   # берём из профиля
+                    if not info.get("name") and name != "Клиент":
+                        set_client_info(chat_id, name=name)
+
+                    await _reply(client, chat_id, synthetic_text, name, lang,
+                                 msg_ts=event.date.timestamp(),
+                                 extra_context_override=ai_hint)
                     return
+
+                # Шаринг контакта (кнопка «Поделиться номером»)
+                # — только если клиент в шаге ask_phone тест-драйва
+                if (isinstance(event.message.media, MessageMediaContact)
+                        and chat_id in _td_state
+                        and _td_state[chat_id].get("step") == "ask_phone"):
+                    raw_phone = event.message.media.phone_number or ""
+                    text = (f"+{raw_phone}"
+                            if raw_phone and not raw_phone.startswith("+")
+                            else raw_phone)
+                else:
+                    return  # другой медиа-тип — игнорируем
 
             if not text:
                 return
 
-            chat_id = event.chat_id
-            name    = await _get_name_from_event(event)
-            lang    = detect_language(text)
+            lang = detect_language(text)
 
             # Обновляем данные клиента
             info    = get_client_info(chat_id)
@@ -1104,17 +1465,22 @@ async def main():
         chat_id = event.chat_id
         text    = event.raw_text or ""
 
-        # Команды в Избранных
+        # ── Команды в Избранных (Saved Messages) ────────────────────────────
         if chat_id == me_id:
-            if text.startswith("/клиенты"):
+            if text.startswith("/справка") or text.startswith("/помощь"):
+                await _cmd_help(client, chat_id)
+
+            elif text.startswith("/клиенты"):
                 await _cmd_clients(client, chat_id)
+
             elif text.startswith("/тестдрайвы"):
                 await _cmd_testdrives(client, chat_id)
+
             elif text.startswith("/чат"):
                 parts = text.split()
                 if len(parts) < 2:
                     await safe_send(client.send_message, me_id,
-                        "Использование: /чат 123456789 [страница]\n"
+                        "Использование: /чат ID [страница]\n"
                         "Пример: /чат 123456789\n"
                         "Следующая страница: /чат 123456789 1")
                 else:
@@ -1125,8 +1491,25 @@ async def main():
                     except ValueError:
                         await safe_send(client.send_message, me_id,
                             "❌ ID клиента должен быть числом. Пример: /чат 123456789")
+
+            elif text.startswith("/обучение"):
+                await _cmd_add_training(client, chat_id, text)
+
+            elif text.startswith("/знание"):
+                await _cmd_knowledge(client, chat_id, text)
+
+            elif text.startswith("/успех"):
+                asyncio.create_task(_cmd_mark_success(client, chat_id, text))
+
+            elif text.startswith("/сделка"):
+                await _cmd_mark_deal(client, chat_id, text)
+
+            elif text.startswith("/импорт"):
+                asyncio.create_task(_cmd_import_conversation(client, chat_id, text))
+
             elif text.startswith("@") or re.match(r"\+?[\d][\d\s\-]{7,14}", text):
                 await _handle_saved_messages(client, event)
+
             return
 
         # Команда обновления цен из любого чата

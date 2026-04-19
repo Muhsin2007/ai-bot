@@ -39,7 +39,9 @@ DEFAULT_PRICES = (
     "Тест-драйв: запись по телефону +998 95 004 97 49"
 )
 
-# Колонки таблицы clients (без extra_json)
+# Колонки таблицы clients (без extra_json).
+# Всё что здесь — сохраняется в именованных колонках (быстрый доступ, индексируемо).
+# Всё остальное (hesitation_score и т.д.) идёт в extra_json.
 _CLIENT_COLS = {
     "name", "lang", "gender", "stage", "model",
     "greeted", "name_asked", "testdrive_scheduled",
@@ -114,6 +116,22 @@ def init_db():
                 fact_value TEXT    NOT NULL,
                 updated_at REAL    NOT NULL,
                 PRIMARY KEY (chat_id, fact_type)
+            );
+
+            CREATE TABLE IF NOT EXISTS training_qa (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                question    TEXT    NOT NULL,
+                answer      TEXT    NOT NULL,
+                source      TEXT    DEFAULT 'manual',
+                created_at  REAL    NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_tqa_question ON training_qa(question);
+
+            CREATE TABLE IF NOT EXISTS conversation_labels (
+                chat_id     INTEGER PRIMARY KEY,
+                label       TEXT    NOT NULL CHECK(label IN ('success','fail','neutral')),
+                labeled_at  REAL    NOT NULL,
+                note        TEXT    DEFAULT ''
             );
         """)
     # Добавляем opted_out если столбец отсутствует (миграция существующих БД)
@@ -522,3 +540,97 @@ def migrate_from_json():
             f.write("done")
     except Exception as e:
         log.warning("Не удалось записать флаг миграции: %s", e)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TRAINING Q&A  (база знаний для ИИ — ответы на типичные вопросы клиентов)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def save_training_qa(question: str, answer: str, source: str = "manual") -> int:
+    """Добавляет пару вопрос-ответ в обучающую базу. Возвращает id новой записи."""
+    with _raw_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO training_qa (question, answer, source, created_at) VALUES (?, ?, ?, ?)",
+            (question.strip(), answer.strip(), source, time.time()),
+        )
+        return cur.lastrowid
+
+
+def search_training_qa(query: str, limit: int = 4) -> list:
+    """
+    Поиск в обучающей базе по ключевым словам.
+    Берёт первые 3 значимых слова запроса и ищет LIKE по question + answer.
+    Возвращает список dict {id, question, answer}.
+    """
+    words = [w for w in query.lower().split() if len(w) >= 3]
+    if not words:
+        return []
+    seen: set[int] = set()
+    results: list  = []
+    with _raw_conn() as conn:
+        for word in words[:3]:
+            rows = conn.execute(
+                "SELECT id, question, answer FROM training_qa "
+                "WHERE LOWER(question) LIKE ? OR LOWER(answer) LIKE ? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (f"%{word}%", f"%{word}%", limit),
+            ).fetchall()
+            for row in rows:
+                if row["id"] not in seen:
+                    seen.add(row["id"])
+                    results.append({"id": row["id"], "question": row["question"],
+                                    "answer": row["answer"]})
+    return results[:limit]
+
+
+def get_all_training_qa(limit: int = 200) -> list:
+    """Возвращает все обучающие пары (для отображения менеджеру)."""
+    with _raw_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, question, answer, source, created_at "
+            "FROM training_qa ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_training_qa(qa_id: int) -> bool:
+    """Удаляет обучающую пару по id. Возвращает True если запись существовала."""
+    with _raw_conn() as conn:
+        cur = conn.execute("DELETE FROM training_qa WHERE id = ?", (qa_id,))
+        return cur.rowcount > 0
+
+
+def count_training_qa() -> int:
+    """Количество записей в обучающей базе знаний."""
+    with _raw_conn() as conn:
+        row = conn.execute("SELECT COUNT(*) AS cnt FROM training_qa").fetchone()
+    return row["cnt"] or 0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CONVERSATION LABELS  (разметка диалогов: успешный / неуспешный)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def set_conversation_label(chat_id: int, label: str, note: str = ""):
+    """
+    Размечает диалог для обучения.
+    label: 'success' (сделка/лид), 'fail' (неудача), 'neutral' (нейтральный).
+    """
+    if label not in ("success", "fail", "neutral"):
+        label = "neutral"
+    with _raw_conn() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO conversation_labels "
+            "(chat_id, label, labeled_at, note) VALUES (?, ?, ?, ?)",
+            (chat_id, label, time.time(), note or ""),
+        )
+
+
+def get_conversation_label(chat_id: int) -> str | None:
+    """Возвращает метку диалога или None если не размечен."""
+    with _raw_conn() as conn:
+        row = conn.execute(
+            "SELECT label FROM conversation_labels WHERE chat_id = ?", (chat_id,)
+        ).fetchone()
+    return row["label"] if row else None
