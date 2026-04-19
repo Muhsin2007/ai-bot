@@ -47,6 +47,7 @@ from ai_handler import (
     detect_hesitation, extract_facts,
     detect_post_purchase, extract_conversation_patterns,
     interpret_sticker,
+    detect_nasiya_calc, NASIYA_ROUTING_MSG,
 )
 
 load_dotenv()
@@ -64,6 +65,7 @@ PAUSE_AFTER_MANUAL_MIN = 30   # мин — пауза после ручного 
 ANTISPAM_COOLDOWN_MIN  = 2    # мин — минимальный интервал между ботовыми ответами
 TG_HISTORY_LIMIT       = 50   # кол-во сообщений загружаемых из TG при первом контакте
 MISSED_MSG_MAX_AGE_H   = 12   # часов — не обрабатывать сообщения старше этого
+BATCH_WAIT_S           = 2.5  # сек — ждём дополнительных сообщений перед ответом
 
 # Координаты салона
 LOCATION_LAT = 41.271219
@@ -99,6 +101,9 @@ _manual_sent:   dict[int, float] = {}   # chat_id → timestamp ручного �
 _bot_sent:      dict[int, float] = {}   # chat_id → timestamp последнего бот-ответа
 _processed_ids: set[int]         = set()  # message_id уже обработанных сообщений
 _tg_loaded:     set[int]         = set()  # chat_id для которых уже загружена история
+
+_msg_buffer:    dict[int, list]           = {}  # chat_id → [text, ...] буфер входящих
+_msg_tasks:     dict[int, asyncio.Task]   = {}  # chat_id → задача debounce
 
 _td_state: dict[int, dict] = {}   # состояние флоу тест-драйва по chat_id
 _TD_FLOW_TIMEOUT = 30 * 60        # сек — заброшенный флоу автоматически сбрасывается
@@ -604,6 +609,18 @@ async def _reply(client: TelegramClient, chat_id: int, text: str, name: str,
             f"⛔ ОТП-АУТ: {name} ({chat_id}) — «{text[:100]}»"))
         return
 
+    # ── 3.3. Расчёт насия/кредита → роутим к @Deepaluz ──────────────────────
+    if detect_nasiya_calc(text):
+        nasiya_msg = NASIYA_ROUTING_MSG.get(lang, NASIYA_ROUTING_MSG["ru"])
+        add_message({}, chat_id, "user", text)
+        add_message({}, chat_id, "assistant", nasiya_msg)
+        await safe_send(client.send_message, chat_id, nasiya_msg)
+        _mark_sent(chat_id)
+        log.info("💳 Насия-роутинг -> %s (%d)", name, chat_id)
+        asyncio.create_task(_notify(client,
+            f"💳 РАСЧЁТ НАСИЯ: {name} (ID: {chat_id})\n«{text[:200]}»"))
+        return
+
     # ── 4. Флоу тест-драйва ─────────────────────────────────────────────────
     if await _handle_testdrive_step(client, chat_id, text, name, lang):
         add_message({}, chat_id, "user", text)
@@ -714,11 +731,17 @@ async def _reply(client: TelegramClient, chat_id: int, text: str, name: str,
             "Один короткий ответ без списков.]"
         )
     elif hesitation_level == "средний" or new_h > 0.4:
-        extra_parts.append(
-            "[Клиент сравнивает варианты. Мягко выдели одно уникальное преимущество "
-            "нашего автомобиля. Можно предложить тест-драйв как способ принять решение — "
-            "без давления, одним предложением.]"
-        )
+        if model_key and count_messages(chat_id) > 4:
+            extra_parts.append(
+                "[Клиент сравнивает варианты. Выдели одно уникальное преимущество "
+                "нашего автомобиля. Предложи тест-драйв как способ принять решение — "
+                "без давления, одним предложением.]"
+            )
+        else:
+            extra_parts.append(
+                "[Клиент сравнивает варианты. Выдели одно уникальное преимущество "
+                "нашего автомобиля. Задай один уточняющий вопрос: какая модель интересует.]"
+            )
     elif hesitation_level == "слабый" or new_h > 0.2:
         extra_parts.append(
             "[Клиент упомянул цену. Не оправдывайся — объясни ценность. "
@@ -739,6 +762,12 @@ async def _reply(client: TelegramClient, chat_id: int, text: str, name: str,
         _mark_sent(chat_id)
         add_message({}, chat_id, "assistant", question)
         return
+
+    # ── 10.5. Локация — отправляем сразу, ДО текстового ответа ──────────────
+    # Пин приходит первым, затем идёт typing + AI-ответ.
+    if asking_location:
+        await _send_location(client, chat_id)
+        await asyncio.sleep(1)
 
     # ── 11. Задержка "печатает..." ──────────────────────────────────────────
     delay = random.uniform(DELAY_MIN, DELAY_MAX)
@@ -767,10 +796,6 @@ async def _reply(client: TelegramClient, chat_id: int, text: str, name: str,
 
         if is_new:
             set_client_info(chat_id, greeted=True)
-
-        if asking_location:
-            await asyncio.sleep(1)
-            await _send_location(client, chat_id)
 
         # ── Follow-up: квалифицируем лид после прайса ───────────────────────
         # Выбираем вопрос в зависимости от того, что уже известно о клиенте
@@ -843,17 +868,12 @@ async def _reply(client: TelegramClient, chat_id: int, text: str, name: str,
 
     log.info("-> %s | %s | %s", name, lang, reply[:80])
 
-    # ── 16. Локация (после текстового ответа) ───────────────────────────────
-    if asking_location:
-        await asyncio.sleep(1)
-        await _send_location(client, chat_id)
-
-    # ── 17. Фото модели ─────────────────────────────────────────────────────
+    # ── 16. Фото модели ─────────────────────────────────────────────────────
     if asking_photo and model_key:
         await asyncio.sleep(1)
         await _send_model_photos(client, chat_id, model_key)
 
-    # ── 18. Summary в фоне каждые 10 сообщений ──────────────────────────────
+    # ── 17. Summary в фоне каждые 10 сообщений ──────────────────────────────
     asyncio.create_task(_update_summary_bg(chat_id))
 
 
@@ -874,6 +894,42 @@ async def _update_summary_bg(chat_id: int):
         summary = await generate_summary(msgs)
         if summary:
             save_summary(chat_id, summary)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DEBOUNCE  — батчинг нескольких сообщений клиента в один ответ
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def _debounce_and_reply(client: TelegramClient, chat_id: int,
+                               name: str, lang: str, msg_ts: float):
+    """
+    Ждёт BATCH_WAIT_S секунд после последнего сообщения клиента.
+    Если за это время пришли ещё сообщения — они уже в буфере.
+    Объединяет все накопленные тексты и отвечает одним _reply().
+
+    Вызывается через asyncio.create_task. Если задача отменена (пришло
+    новое сообщение) — CancelledError поглощается и reply не вызывается.
+    """
+    try:
+        await asyncio.sleep(BATCH_WAIT_S)
+    except asyncio.CancelledError:
+        return  # новое сообщение — перезапустят нас с обновлённым буфером
+
+    texts = _msg_buffer.pop(chat_id, [])
+    if not texts:
+        return
+
+    combined   = " ".join(texts)
+    extra_ctx  = ""
+    if len(texts) > 1:
+        extra_ctx = (
+            f"[Клиент написал {len(texts)} сообщения подряд: «{combined[:400]}». "
+            f"Ответь на все вопросы в одном сообщении естественно — без упоминания паузы.]"
+        )
+        log.info("Дебаунс: объединено %d сообщ. от %s (%d)", len(texts), name, chat_id)
+
+    await _reply(client, chat_id, combined, name, lang,
+                 msg_ts=msg_ts, extra_context_override=extra_ctx)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1454,7 +1510,22 @@ async def main():
             msg_ts = event.date.timestamp()
             log.info("← %s | %s | %s", name, lang, text[:80])
 
-            await _reply(client, chat_id, text, name, lang, msg_ts=msg_ts)
+            # Флоу тест-драйва (шаг ввода телефона) — отвечаем немедленно,
+            # не буферизуем: нельзя смешивать номер телефона с другим текстом.
+            if (chat_id in _td_state
+                    and _td_state[chat_id].get("step") == "ask_phone"):
+                await _reply(client, chat_id, text, name, lang, msg_ts=msg_ts)
+                return
+
+            # Дебаунс — ждём BATCH_WAIT_S секунд перед ответом.
+            # Если клиент пишет несколько сообщений подряд — объединяем в одно.
+            _msg_buffer.setdefault(chat_id, []).append(text)
+            old_task = _msg_tasks.get(chat_id)
+            if old_task and not old_task.done():
+                old_task.cancel()
+            _msg_tasks[chat_id] = asyncio.create_task(
+                _debounce_and_reply(client, chat_id, name, lang, msg_ts)
+            )
 
         except Exception:
             log.exception("Ошибка on_incoming [chat=%s]", getattr(event, "chat_id", "?"))
