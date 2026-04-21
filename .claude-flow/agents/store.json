@@ -90,6 +90,110 @@
       "createdAt": "2026-04-21T10:13:54.779Z",
       "model": "sonnet",
       "modelRoutedBy": "default"
+    },
+    "agent-1776767859547-6zt7lb": {
+      "agentId": "agent-1776767859547-6zt7lb",
+      "agentType": "tester",
+      "status": "idle",
+      "health": 1,
+      "taskCount": 0,
+      "config": {
+        "provider": "anthropic"
+      },
+      "createdAt": "2026-04-21T10:37:39.547Z",
+      "model": "sonnet",
+      "modelRoutedBy": "default"
+    },
+    "agent-1776767863568-lf5fkc": {
+      "agentId": "agent-1776767863568-lf5fkc",
+      "agentType": "architect",
+      "status": "idle",
+      "health": 1,
+      "taskCount": 0,
+      "config": {
+        "provider": "anthropic"
+      },
+      "createdAt": "2026-04-21T10:37:43.568Z",
+      "model": "opus",
+      "modelRoutedBy": "default"
+    },
+    "agent-1776767867524-z6c618": {
+      "agentId": "agent-1776767867524-z6c618",
+      "agentType": "security-architect",
+      "status": "idle",
+      "health": 1,
+      "taskCount": 0,
+      "config": {
+        "provider": "anthropic"
+      },
+      "createdAt": "2026-04-21T10:37:47.524Z",
+      "model": "opus",
+      "modelRoutedBy": "default"
+    },
+    "agent-1776767871389-xwlvmn": {
+      "agentId": "agent-1776767871389-xwlvmn",
+      "agentType": "security-auditor",
+      "status": "idle",
+      "health": 1,
+      "taskCount": 0,
+      "config": {
+        "provider": "anthropic"
+      },
+      "createdAt": "2026-04-21T10:37:51.389Z",
+      "model": "sonnet",
+      "modelRoutedBy": "default"
+    },
+    "agent-1776767875241-5alss3": {
+      "agentId": "agent-1776767875241-5alss3",
+      "agentType": "swarm-specialist",
+      "status": "idle",
+      "health": 1,
+      "taskCount": 0,
+      "config": {
+        "provider": "anthropic"
+      },
+      "createdAt": "2026-04-21T10:37:55.241Z",
+      "model": "sonnet",
+      "modelRoutedBy": "default"
+    },
+    "agent-1776767879182-ssg5wf": {
+      "agentId": "agent-1776767879182-ssg5wf",
+      "agentType": "performance-engineer",
+      "status": "idle",
+      "health": 1,
+      "taskCount": 0,
+      "config": {
+        "provider": "anthropic"
+      },
+      "createdAt": "2026-04-21T10:37:59.182Z",
+      "model": "sonnet",
+      "modelRoutedBy": "default"
+    },
+    "agent-1776767883078-9s2q0r": {
+      "agentId": "agent-1776767883078-9s2q0r",
+      "agentType": "core-architect",
+      "status": "idle",
+      "health": 1,
+      "taskCount": 0,
+      "config": {
+        "provider": "anthropic"
+      },
+      "createdAt": "2026-04-21T10:38:03.078Z",
+      "model": "opus",
+      "modelRoutedBy": "default"
+    },
+    "agent-1776767886969-vojqae": {
+      "agentId": "agent-1776767886969-vojqae",
+      "agentType": "test-architect",
+      "status": "idle",
+      "health": 1,
+      "taskCount": 0,
+      "config": {
+        "provider": "anthropic"
+      },
+      "createdAt": "2026-04-21T10:38:06.969Z",
+      "model": "sonnet",
+      "modelRoutedBy": "default"
     }
   },
   "version": "3.0.0"

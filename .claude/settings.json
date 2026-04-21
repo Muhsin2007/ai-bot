@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python *.py)",
+      "Bash(python -c *)",
+      "Bash(python -m *)",
+      "Bash(pip install *)",
+      "Bash(pip show *)",
+      "Bash(git status)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git push *)",
+      "Bash(git pull)",
+      "Bash(git branch *)",
+      "Bash(npx @claude-flow/cli@latest *)",
+      "Bash(npx ruflo *)"
+    ],
+    "deny": []
+  },
+  "model": "claude-opus-4-5",
+  "ruflo": {
+    "project": "tat-auto-bot",
+    "topology": "hierarchical",
+    "maxAgents": 6,
+    "memory": {
+      "namespace": "tat_auto",
+      "backend": "hybrid"
+    },
+    "hooks": {
+      "postEdit": true,
+      "postTask": true
+    }
+  }
+}

@@ -386,6 +386,11 @@ async def _send_location(client: TelegramClient, chat_id: int):
     except Exception as e:
         log.warning("Локация venue [%d]: %s", chat_id, e)
     await safe_send(client.send_message, chat_id, MAPS_LINK)
+    await safe_send(
+        client.send_message,
+        chat_id,
+        "Ждём вас! Если нужна помощь — звоните Джавохиру: +998 98 444 05 44"
+    )
     log.info("Локация отправлена -> %d", chat_id)
 
 
@@ -460,19 +465,19 @@ async def _send_model_photos(client: TelegramClient, chat_id: int, model_key: st
 
 _TD_QUESTIONS = {
     "ask_datetime": {
-        "ru": "На какую дату и время Вам удобно записаться?",
-        "uz": "Qaysi sana va vaqt qulay bo'ladi?",
-        "en": "What date and time works best for you?",
+        "ru": "Когда вам удобно подъехать? Работаем каждый день с 9 до 19.",
+        "uz": "Qachon qulay? Har kuni 9 dan 19 gacha ishlaymiz.",
+        "en": "When works for you? We're open daily 9am-7pm.",
     },
     "ask_phone": {
-        "ru": "Хорошо. Укажите Ваш номер телефона для подтверждения.",
-        "uz": "Yaxshi. Tasdiqlash uchun telefon raqamingizni yozing.",
-        "en": "Great. Please share your phone number for confirmation.",
+        "ru": "Отлично! Скиньте номер — я напомню за день до визита.",
+        "uz": "Yaxshi! Raqamingizni yozing — bir kun oldin eslataman.",
+        "en": "Great! Send your number — I'll text you a day before.",
     },
     "confirm": {
-        "ru": "Записал. Ждём Вас в TAT AUTO на Шота Руставели 77.",
-        "uz": "Yozib oldim. Shota Rustaveli 77 da TAT AUTO salonida kutamiz.",
-        "en": "Booked. See you at TAT AUTO, Shota Rustaveli 77.",
+        "ru": "Записал вас! Ждём на Шота Руставели 77. До встречи!",
+        "uz": "Yozdim! Shota Rustaveli 77 da kutamiz. Ko'rishguncha!",
+        "en": "You're booked! See you at Shota Rustaveli 77!",
     },
 }
 

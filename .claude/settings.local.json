@@ -1,6 +1,12 @@
 {
+  "permissions": {
+    "allow": [
+      "mcp__claude-flow__system_status",
+      "mcp__claude-flow__agent_list"
+    ]
+  },
+  "enableAllProjectMcpServers": true,
   "enabledMcpjsonServers": [
     "claude-flow"
-  ],
-  "enableAllProjectMcpServers": true
+  ]
 }

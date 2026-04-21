@@ -111,9 +111,9 @@ _OPTOUT_KW = [
 
 # Вежливые прощания при отписке (на 3 языках)
 OPTOUT_FAREWELL = {
-    "ru": "Понял, больше не буду беспокоить. Если когда-нибудь понадобится помощь — мы всегда здесь.",
-    "uz": "Tushundim, endi bezovta qilmayman. Kerak bo'lsa — har doim yordam berishga tayyorman.",
-    "en": "Understood, I won't bother you anymore. Feel free to reach out anytime.",
+    "ru": "Понял вас. Удачи с выбором! Если что — пишите, всегда рад помочь.",
+    "uz": "Tushundim. Omad tilayman! Kerak bo'lsa yozing, yordam beraman.",
+    "en": "Got it. Good luck! Just text me if you need anything.",
 }
 
 
@@ -703,19 +703,16 @@ def detect_nasiya_calc(text: str) -> bool:
 # Ответы-роутинг по насия/кредитному расчёту
 NASIYA_ROUTING_MSG = {
     "ru": (
-        "Точный расчёт ежемесячного платежа делает наш менеджер — "
-        "он учтёт модель, первый взнос и срок.\n"
-        "Напишите @Deepaluz — рассчитает за пару минут."
+        "По насия лучше Дилшод всё объяснит — он каждый день этим занимается.\n"
+        "Напишите ему @Deepaluz, он быстро посчитает под ваш бюджет."
     ),
     "uz": (
-        "Oylik to'lovni aniq hisoblash menejerlari tomonidan amalga oshiriladi — "
-        "u model, boshlang'ich to'lov va muddatni hisobga oladi.\n"
-        "@Deepaluz ga yozing — bir necha daqiqada hisob-kitob qiladi."
+        "Nasiya bo'yicha Dilshod yaxshi tushuntiradi — har kuni shu bilan shug'ullanadi.\n"
+        "@Deepaluz ga yozing, u tez hisob-kitob qiladi."
     ),
     "en": (
-        "Exact monthly payment calculation is handled by our manager — "
-        "they'll factor in the model, down payment, and term.\n"
-        "Message @Deepaluz and they'll calculate it in minutes."
+        "For financing, Dilshod is your guy — he handles this every day.\n"
+        "Message him @Deepaluz, he'll run the numbers for you."
     ),
 }
 
@@ -926,9 +923,9 @@ def _load_training_context(query: str) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 
 _SYSTEM_BASE = """\
-Ты — Воя, менеджер по продажам автосалона TAT AUTO в Ташкенте.
-Продаёшь электромобили Voyah и M-Hero. Своё имя — Воя.
-Никогда не называй себя ИИ, ботом, роботом или виртуальным ассистентом — ты живой менеджер.
+Ты — Воя, работаю в TAT AUTO уже третий год.
+Занимаюсь электромобилями Voyah и M-Hero — знаю их вдоль и поперёк.
+Никогда не называй себя ИИ, ботом или ассистентом — ты обычный парень из салона.
 
 {lang_instruction}
 
@@ -937,7 +934,8 @@ _SYSTEM_BASE = """\
 Максимум 2-3 предложения за раз. Коротко и по делу.
 Обращайся на «Вы», уважительно.{name_instruction}
 Пунктуация: один знак в конце. Никогда «?!» или «!!» — это грубо.
-Не начинай с шаблонов: «Конечно!», «Отлично!», «Разумеется!», «Конечно же!».
+Не начинай с шаблонов: «Конечно!», «Отлично!», «Разумеется!», «Конечно же!», «Буду рад помочь!», «С удовольствием!».
+Начинай сразу с сути. Вместо «Конечно, расскажу!» — просто расскажи.
 
 {greeting_instruction}
 

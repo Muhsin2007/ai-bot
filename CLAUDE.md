@@ -2,6 +2,30 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Ruflo / AI Agent Setup
+
+Ruflo v3.5.80 is integrated. Project agents live in `.claude/agents/`:
+
+| Agent file | Trigger | Handles |
+|------------|---------|---------|
+| `feature-dev.md` | New features, pipeline changes | main.py, ai_handler.py wiring |
+| `db-engineer.md` | Schema changes, new tables | storage_db.py CRUD |
+| `qa-reviewer.md` | After any feature lands | Syntax, async safety, language completeness |
+
+**Spawn an agent:**
+```bash
+# Research / planning
+npx @claude-flow/cli@latest agent spawn -t researcher --name tat-research
+
+# Store a decision in project memory
+npx @claude-flow/cli@latest memory store --key "decision-nasiya" --value "route to @Deepaluz, never compute" --namespace tat_auto
+
+# Search past decisions
+npx @claude-flow/cli@latest memory search --query "test drive rules" --namespace tat_auto
+```
+
+**Project memory namespace:** `tat_auto`
+
 ## What this project is
 
 **TAT AUTO** — a Telegram userbot (not a bot account) for an electric car dealership in Tashkent. It runs as a real user account via Telethon, auto-replies to incoming private messages using Claude AI, handles test-drive bookings, credit calculations, and logs leads to Google Sheets.
