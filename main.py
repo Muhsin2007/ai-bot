@@ -529,7 +529,7 @@ async def _handle_testdrive_step(client: TelegramClient, chat_id: int,
 
         save_appointment(
             chat_id=chat_id, name=name, model=model_name,
-            datetime_str=state.get("datetime", "не указано"), phone=text,
+            datetime_str=state.get("datetime", "не указано"), phone=normalized,
         )
         set_client_stage(chat_id, "testdrive_scheduled")
         set_client_info(chat_id, testdrive_scheduled=True)
@@ -544,7 +544,7 @@ async def _handle_testdrive_step(client: TelegramClient, chat_id: int,
             f"Клиент: {name} (ID: {chat_id})\n"
             f"Модель: {model_name}\n"
             f"Дата/время: {state.get('datetime', '?')}\n"
-            f"Телефон: {text}"))
+            f"Телефон: {normalized}"))
 
         del _td_state[chat_id]
         return True

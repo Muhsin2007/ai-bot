@@ -44,6 +44,11 @@ async def safe_send(coro_func, *args, max_retries: int = 2, **kwargs):
                 log.error("FloodWait слишком долгий (%d сек) — пропускаю отправку", wait)
                 return None
             await asyncio.sleep(wait)
+            if attempt == max_retries:
+                try:
+                    return await coro_func(*args, **kwargs)
+                except Exception:
+                    return None
 
         except UserIsBlockedError:
             log.warning("Пользователь заблокировал бота — %s", _target(args, kwargs))

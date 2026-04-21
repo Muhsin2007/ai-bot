@@ -1263,7 +1263,10 @@ async def extract_facts(messages: list, chat_id: int):
         )
         raw = resp.content[0].text.strip()
         if "```" in raw:
-            raw = raw.split("```")[1].lstrip("json\n").strip()
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+            raw = raw.lstrip("\n").strip()
         facts = json.loads(raw)
         facts = {k: v for k, v in facts.items()
                  if v and str(v).lower() not in ("null", "none", "")}
@@ -1333,7 +1336,10 @@ async def extract_conversation_patterns(messages: list, chat_id: int) -> int:
         )
         raw = resp.content[0].text.strip()
         if "```" in raw:
-            raw = raw.split("```")[1].lstrip("json\n").strip()
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+            raw = raw.lstrip("\n").strip()
         patterns = json.loads(raw)
         if not isinstance(patterns, list):
             return 0
