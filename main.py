@@ -381,9 +381,13 @@ _LOCATION_CAPTION = (
 
 async def _send_location(client: TelegramClient, chat_id: int):
     """
-    Одно сообщение: Telegram venue-карточка с подписью (Яндекс + Google).
-    Fallback: если venue не отправился — шлём только текст со ссылками.
+    Сообщение 1: Telegram venue-карточка (пин на карте).
+    Сообщение 2: Яндекс Карты + Google Maps ссылки.
+    Venue не поддерживает caption — отправляем двумя сообщениями.
+    Fallback: если venue упал — шлём только текст.
     """
+    # 1. Venue-карточка (пин на карте)
+    venue_ok = False
     try:
         await client(SendMediaRequest(
             peer=await client.get_input_entity(chat_id),
@@ -393,13 +397,18 @@ async def _send_location(client: TelegramClient, chat_id: int):
                 address="г. Ташкент, ул. Шота Руставели 77",
                 provider="", venue_id="", venue_type="",
             ),
-            message=_LOCATION_CAPTION,
+            message="",
             random_id=random.randint(1, 2**63),
         ))
-        log.info("Локация -> %d", chat_id)
+        venue_ok = True
+        log.info("Локация venue -> %d", chat_id)
     except Exception as e:
-        log.warning("Локация venue [%d]: %s — отправляю ссылки текстом", chat_id, e)
-        await safe_send(client.send_message, chat_id, _LOCATION_CAPTION)
+        log.warning("Локация venue [%d]: %s", chat_id, e)
+
+    # 2. Ссылки на карты (отдельным сообщением)
+    await safe_send(client.send_message, chat_id, _LOCATION_CAPTION)
+    if not venue_ok:
+        log.info("Локация (только ссылки, venue не отправился) -> %d", chat_id)
 
 
 async def _send_price(client: TelegramClient, chat_id: int):
