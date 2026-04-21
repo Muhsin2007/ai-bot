@@ -366,11 +366,24 @@ async def _load_tg_history(client: TelegramClient, chat_id: int):
 # SENDERS
 # ══════════════════════════════════════════════════════════════════════════════
 
-MAPS_LINK = "https://maps.app.goo.gl/iLfVr5HWjYJShQsK8"
+MAPS_LINK        = "https://maps.app.goo.gl/iLfVr5HWjYJShQsK8"
+YANDEX_MAPS_LINK = (
+    f"https://yandex.uz/maps/?ll={LOCATION_LON},{LOCATION_LAT}"
+    f"&z=17&pt={LOCATION_LON},{LOCATION_LAT},pm2rdm"
+)
+
+# Подпись к venue-карточке — ссылки прямо в одном сообщении
+_LOCATION_CAPTION = (
+    f"📍 Яндекс Карты: {YANDEX_MAPS_LINK}\n"
+    f"📍 Google Maps: {MAPS_LINK}"
+)
 
 
 async def _send_location(client: TelegramClient, chat_id: int):
-    """Отправляет venue-карточку с адресом салона и Google Maps ссылку."""
+    """
+    Одно сообщение: Telegram venue-карточка с подписью (Яндекс + Google).
+    Fallback: если venue не отправился — шлём только текст со ссылками.
+    """
     try:
         await client(SendMediaRequest(
             peer=await client.get_input_entity(chat_id),
@@ -380,18 +393,13 @@ async def _send_location(client: TelegramClient, chat_id: int):
                 address="г. Ташкент, ул. Шота Руставели 77",
                 provider="", venue_id="", venue_type="",
             ),
-            message="",
+            message=_LOCATION_CAPTION,
             random_id=random.randint(1, 2**63),
         ))
+        log.info("Локация -> %d", chat_id)
     except Exception as e:
-        log.warning("Локация venue [%d]: %s", chat_id, e)
-    await safe_send(client.send_message, chat_id, MAPS_LINK)
-    await safe_send(
-        client.send_message,
-        chat_id,
-        "Ждём вас! Если нужна помощь — звоните Джавохиру: +998 98 444 05 44"
-    )
-    log.info("Локация отправлена -> %d", chat_id)
+        log.warning("Локация venue [%d]: %s — отправляю ссылки текстом", chat_id, e)
+        await safe_send(client.send_message, chat_id, _LOCATION_CAPTION)
 
 
 async def _send_price(client: TelegramClient, chat_id: int):
