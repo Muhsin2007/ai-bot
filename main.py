@@ -73,7 +73,7 @@ LOCATION_LON = 69.238094
 
 # Прайс — пересылаем конкретное сообщение из канала
 PRICE_CHANNEL = "deeeepal"
-PRICE_MSG_ID  = 3
+PRICE_MSG_ID  = 6
 
 # Фото моделей (локальные файлы)
 MODEL_PHOTOS: dict[str, list[str]] = {
