@@ -17,7 +17,7 @@ import time
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from telethon.tl.types import User, MessageMediaContact
+from telethon.tl.types import User, MessageMediaContact, MessageMediaVenue, MessageMediaGeo
 from telethon.tl.functions.messages import SendMediaRequest
 from telethon.tl.types import InputMediaVenue, InputGeoPoint
 
@@ -68,12 +68,20 @@ MISSED_MSG_MAX_AGE_H   = 12   # часов — не обрабатывать с�
 BATCH_WAIT_S           = 2.5  # сек — ждём дополнительных сообщений перед ответом
 
 # Координаты салона
-LOCATION_LAT = 41.271219
-LOCATION_LON = 69.238094
+LOCATION_LAT = 41.27141264101891
+LOCATION_LON = 69.23809351597293
 
-# Прайс — пересылаем конкретное сообщение из канала
+# Прайс — конкретное сообщение из канала
 PRICE_CHANNEL = "deeeepal"
 PRICE_MSG_ID  = 6
+
+# Локация — venue-сообщение из того же канала.
+# Как опубликовать:
+#   1. Открой канал @deeeepal
+#   2. Отправь туда локацию (Вложение → Локация → "Отправить как геопозицию" или venue)
+#   3. Запомни ID сообщения и поставь ниже
+# Пока 0 — бот использует координаты из кода (LOCATION_LAT/LON).
+LOCATION_MSG_ID = 16
 
 # Фото моделей (локальные файлы)
 MODEL_PHOTOS: dict[str, list[str]] = {
@@ -381,34 +389,82 @@ _LOCATION_CAPTION = (
 
 async def _send_location(client: TelegramClient, chat_id: int):
     """
-    Сообщение 1: Telegram venue-карточка (пин на карте).
-    Сообщение 2: Яндекс Карты + Google Maps ссылки.
-    Venue не поддерживает caption — отправляем двумя сообщениями.
-    Fallback: если venue упал — шлём только текст.
-    """
-    # 1. Venue-карточка (пин на карте)
-    venue_ok = False
-    try:
-        await client(SendMediaRequest(
-            peer=await client.get_input_entity(chat_id),
-            media=InputMediaVenue(
-                geo_point=InputGeoPoint(lat=LOCATION_LAT, long=LOCATION_LON),
-                title="TAT AUTO",
-                address="г. Ташкент, ул. Шота Руставели 77",
-                provider="", venue_id="", venue_type="",
-            ),
-            message="",
-            random_id=random.randint(1, 2**63),
-        ))
-        venue_ok = True
-        log.info("Локация venue -> %d", chat_id)
-    except Exception as e:
-        log.warning("Локация venue [%d]: %s", chat_id, e)
+    Отправляет локацию двумя сообщениями:
+      1. Telegram venue-карточка (пин на карте)
+      2. Яндекс + Google Maps ссылки
 
-    # 2. Ссылки на карты (отдельным сообщением)
+    Два режима venue-карточки:
+      A. LOCATION_MSG_ID > 0 — берём venue из канала (как прайс),
+         re-upload без атрибуции. Менеджер может обновить адрес сам,
+         просто опубликовав новую локацию в канале и поменяв ID.
+      B. LOCATION_MSG_ID == 0 — venue строится из координат в коде
+         (LOCATION_LAT / LOCATION_LON).
+
+    Fallback во всех случаях: если venue не отправился — только ссылки.
+    """
+    venue_ok = False
+    peer = await client.get_input_entity(chat_id)
+
+    # ── Режим A: venue из канала (как прайс) ──────────────────────────────
+    if LOCATION_MSG_ID > 0:
+        try:
+            channel = await client.get_entity(PRICE_CHANNEL)
+            msgs    = await client.get_messages(channel, ids=[LOCATION_MSG_ID])
+            msg     = msgs[0] if msgs else None
+
+            if msg and isinstance(msg.media, (MessageMediaVenue, MessageMediaGeo)):
+                media = msg.media
+                if isinstance(media, MessageMediaVenue):
+                    geo   = media.geo
+                    venue_media = InputMediaVenue(
+                        geo_point=InputGeoPoint(lat=geo.lat, long=geo.long),
+                        title=media.title or "TAT AUTO",
+                        address=media.address or "г. Ташкент, ул. Шота Руставели 77",
+                        provider=media.provider or "",
+                        venue_id=media.venue_id or "",
+                        venue_type=media.venue_type or "",
+                    )
+                else:  # MessageMediaGeo — просто гео без названия
+                    geo   = media.geo
+                    venue_media = InputMediaVenue(
+                        geo_point=InputGeoPoint(lat=geo.lat, long=geo.long),
+                        title="TAT AUTO",
+                        address="г. Ташкент, ул. Шота Руставели 77",
+                        provider="", venue_id="", venue_type="",
+                    )
+
+                await client(SendMediaRequest(
+                    peer=peer, media=venue_media,
+                    message="", random_id=random.randint(1, 2**63),
+                ))
+                venue_ok = True
+                log.info("Локация (канал msg=%d) -> %d", LOCATION_MSG_ID, chat_id)
+
+        except Exception as e:
+            log.warning("Локация из канала [%d]: %s — переключаюсь на код", chat_id, e)
+
+    # ── Режим B: venue из координат в коде (fallback или LOCATION_MSG_ID==0) ─
+    if not venue_ok:
+        try:
+            await client(SendMediaRequest(
+                peer=peer,
+                media=InputMediaVenue(
+                    geo_point=InputGeoPoint(lat=LOCATION_LAT, long=LOCATION_LON),
+                    title="TAT AUTO",
+                    address="г. Ташкент, ул. Шота Руставели 77",
+                    provider="", venue_id="", venue_type="",
+                ),
+                message="", random_id=random.randint(1, 2**63),
+            ))
+            venue_ok = True
+            log.info("Локация (код) -> %d", chat_id)
+        except Exception as e:
+            log.warning("Локация venue [%d]: %s", chat_id, e)
+
+    # ── Всегда: ссылки на карты ───────────────────────────────────────────
     await safe_send(client.send_message, chat_id, _LOCATION_CAPTION)
     if not venue_ok:
-        log.info("Локация (только ссылки, venue не отправился) -> %d", chat_id)
+        log.info("Локация (только ссылки) -> %d", chat_id)
 
 
 async def _send_price(client: TelegramClient, chat_id: int):
