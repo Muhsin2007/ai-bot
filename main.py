@@ -12,6 +12,7 @@ import asyncio
 import os
 import random
 import re
+import tempfile
 import time
 
 from dotenv import load_dotenv
@@ -35,6 +36,7 @@ from storage_db import (
     save_training_qa, get_all_training_qa, delete_training_qa, count_training_qa,
     set_conversation_label, get_conversation_label,
 )
+from voice_handler import transcribe_voice
 from ai_handler import (
     get_ai_reply, generate_summary, detect_language, detect_gender,
     detect_competitor, get_competitor_facts,
@@ -119,6 +121,8 @@ _TD_FLOW_TIMEOUT = 30 * 60        # сек — заброшенный флоу �
 _active_model: dict[int, tuple] = {}   # chat_id → (model_key, timestamp_last_mentioned)
 _ACTIVE_MODEL_TTL = 30 * 60           # сек — активная модель сбрасывается после 30 мин молчания
 
+_ai_fail_notified: dict[int, float] = {}  # chat_id → timestamp последнего уведомления AI-ошибки
+
 me_id:       int   = 0
 _startup_ts: float = 0.0
 
@@ -146,15 +150,31 @@ def _mark_sent(chat_id: int):
 
 def _cleanup_old_timestamps():
     """Удаляет записи старше 2 часов из in-memory словарей."""
-    cutoff = time.time() - 7200  # 2 часа
-    stale_bot    = [k for k, v in _bot_sent.items()    if v < cutoff]
-    stale_manual = [k for k, v in _manual_sent.items() if v < cutoff]
-    for k in stale_bot:
-        _bot_sent.pop(k, None)
-    for k in stale_manual:
-        _manual_sent.pop(k, None)
-    if stale_bot or stale_manual:
-        log.debug("Очищено временных меток: bot=%d manual=%d", len(stale_bot), len(stale_manual))
+    now    = time.time()
+    cutoff = now - 7200   # 2 часа
+    td_cutoff = now - _TD_FLOW_TIMEOUT
+
+    stale_bot    = [k for k, v in _bot_sent.items()          if v < cutoff]
+    stale_manual = [k for k, v in _manual_sent.items()       if v < cutoff]
+    stale_model  = [k for k, (_, ts) in _active_model.items() if now - ts > _ACTIVE_MODEL_TTL]
+    stale_td     = [k for k, v in _td_state.items()          if now - v.get("started", 0) > _TD_FLOW_TIMEOUT]
+    stale_notify = [k for k, v in _ai_fail_notified.items()  if v < cutoff]
+
+    for k in stale_bot:    _bot_sent.pop(k, None)
+    for k in stale_manual: _manual_sent.pop(k, None)
+    for k in stale_model:  _active_model.pop(k, None)
+    for k in stale_td:
+        _td_state.pop(k, None)
+        _msg_buffer.pop(k, None)
+        t = _msg_tasks.pop(k, None)
+        if t and not t.done():
+            t.cancel()
+    for k in stale_notify: _ai_fail_notified.pop(k, None)
+
+    cleaned = len(stale_bot) + len(stale_manual) + len(stale_model) + len(stale_td)
+    if cleaned:
+        log.debug("Очищено: bot=%d manual=%d model=%d td=%d",
+                  len(stale_bot), len(stale_manual), len(stale_model), len(stale_td))
 
 
 def _is_opted_out(chat_id: int) -> bool:
@@ -310,7 +330,9 @@ async def _should_handle(event) -> bool:
         return False
     if event.chat_id == me_id:
         return False
-    if _is_paused(event.chat_id):
+    # Пауза после ручного ответа — НО не прерываем активный тест-драйв флоу.
+    # Клиент уже ждёт следующего шага (номер телефона / дату) — нельзя его бросить.
+    if _is_paused(event.chat_id) and event.chat_id not in _td_state:
         return False
     if event.date.timestamp() < _startup_ts:
         return False
@@ -573,9 +595,10 @@ async def _handle_testdrive_step(client: TelegramClient, chat_id: int,
     if step == "ask_datetime":
         state["datetime"] = text
         state["step"]     = "ask_phone"
+        add_message({}, chat_id, "user", text)   # user msg FIRST (правильный порядок)
         q = _TD_QUESTIONS["ask_phone"].get(lang, _TD_QUESTIONS["ask_phone"]["ru"])
         await safe_send(client.send_message, chat_id, q)
-        add_message({}, chat_id, "assistant", q)   # BUG #4 fix
+        add_message({}, chat_id, "assistant", q)
         _mark_sent(chat_id)
         return True
 
@@ -609,6 +632,7 @@ async def _handle_testdrive_step(client: TelegramClient, chat_id: int,
         model_key      = info.get("model", state.get("model", ""))
         model_name     = model_key.replace("_", " ").upper() if model_key else "не указана"
 
+        add_message({}, chat_id, "user", text)   # user msg FIRST (правильный порядок)
         save_appointment(
             chat_id=chat_id, name=name, model=model_name,
             datetime_str=state.get("datetime", "не указано"), phone=normalized,
@@ -618,7 +642,7 @@ async def _handle_testdrive_step(client: TelegramClient, chat_id: int,
 
         confirm = _TD_QUESTIONS["confirm"].get(lang, _TD_QUESTIONS["confirm"]["ru"])
         await safe_send(client.send_message, chat_id, confirm)
-        add_message({}, chat_id, "assistant", confirm)   # BUG #4 fix
+        add_message({}, chat_id, "assistant", confirm)
         _mark_sent(chat_id)
 
         asyncio.create_task(_notify(client,
@@ -704,8 +728,8 @@ async def _reply(client: TelegramClient, chat_id: int, text: str, name: str,
         return
 
     # ── 4. Флоу тест-драйва ─────────────────────────────────────────────────
+    # user msg сохраняется ВНУТРИ _handle_testdrive_step (до assistant msg)
     if await _handle_testdrive_step(client, chat_id, text, name, lang):
-        add_message({}, chat_id, "user", text)
         return
 
     # ── 5. Сохраняем сообщение ──────────────────────────────────────────────
@@ -934,9 +958,12 @@ async def _reply(client: TelegramClient, chat_id: int, text: str, name: str,
         # AI недоступен — отвечаем fallback-сообщением чтобы клиент не висел без ответа
         reply = _FALLBACK_REPLIES.get(lang, _FALLBACK_REPLIES["ru"])
         log.warning("AI вернул None — использую fallback для chat_id=%d", chat_id)
-        # Уведомляем менеджера если AI упал (не чаще 1 раза в 10 мин на chat_id)
-        asyncio.create_task(_notify(client,
-            f"⚠️ AI API недоступен — отправлен fallback ответ клиенту ID {chat_id}"))
+        # Уведомляем менеджера не чаще раза в 10 мин на один chat_id
+        _last_notified = _ai_fail_notified.get(chat_id, 0)
+        if time.time() - _last_notified > 600:
+            _ai_fail_notified[chat_id] = time.time()
+            asyncio.create_task(_notify(client,
+                f"⚠️ AI API недоступен — отправлен fallback ответ клиенту ID {chat_id}"))
 
     # ── 15. Отправляем ответ ─────────────────────────────────────────────────
     await safe_send(client.send_message, chat_id, reply)
@@ -999,6 +1026,12 @@ async def _debounce_and_reply(client: TelegramClient, chat_id: int,
 
     texts = _msg_buffer.pop(chat_id, [])
     if not texts:
+        return
+
+    # Антиспам: если бот уже отвечал < ANTISPAM_COOLDOWN_MIN назад — пропускаем
+    # (Исключение: тест-драйв флоу — там каждый шаг важен)
+    if not _can_send(chat_id) and chat_id not in _td_state:
+        log.debug("Антиспам: пропуск ответа для %d", chat_id)
         return
 
     combined   = " ".join(texts)
@@ -1565,9 +1598,79 @@ async def main():
                                  extra_context_override=ai_hint)
                     return
 
+                # Голосовое сообщение → транскрибируем и обрабатываем как текст
+                if getattr(event.message, "voice", None) is not None:
+                    info = get_client_info(chat_id)
+                    lang_for_voice = info.get("lang") or "ru"
+                    if not info.get("name") and name != "Клиент":
+                        set_client_info(chat_id, name=name)
+
+                    tmp_path = None
+                    try:
+                        # Скачиваем OGG во временный файл
+                        tmp_fd, tmp_path = tempfile.mkstemp(suffix=".ogg")
+                        os.close(tmp_fd)
+                        await client.download_media(event.message, file=tmp_path)
+
+                        # Транскрипция (блокирующая) — в executor
+                        loop = asyncio.get_running_loop()
+                        transcribed = await loop.run_in_executor(
+                            None, transcribe_voice, tmp_path
+                        )
+                    except Exception as e:
+                        log.warning("Voice download/transcribe [%d]: %s", chat_id, e)
+                        transcribed = None
+                    finally:
+                        if tmp_path and os.path.exists(tmp_path):
+                            try:
+                                os.unlink(tmp_path)
+                            except Exception:
+                                pass
+
+                    if not transcribed:
+                        _no_voice = {
+                            "ru": "Не смог распознать голосовое — напишите текстом, отвечу сразу.",
+                            "uz": "Ovozli xabarni taniy olmadim — matn yozing, javob beraman.",
+                            "en": "Couldn't transcribe the voice — please type your question.",
+                        }
+                        await safe_send(client.send_message, chat_id,
+                                        _no_voice.get(lang_for_voice, _no_voice["ru"]))
+                        return
+
+                    text = transcribed
+                    log.info("← VOICE %s (%d): %s", name, chat_id, text[:80])
+
+                # Фото от клиента → вероятно трейд-ин или запрос на фото наших авто
+                elif event.message.photo:
+                    info = get_client_info(chat_id)
+                    lang_for_photo = info.get("lang") or "ru"
+                    if not info.get("name") and name != "Клиент":
+                        set_client_info(chat_id, name=name)
+
+                    # Определяем контекст: клиент в трейд-ин разговоре или нет
+                    in_tradein = info.get("tradein_asked")
+                    if in_tradein:
+                        photo_hint = (
+                            "[Клиент прислал фото своей машины (трейд-ин). "
+                            "Поблагодари за фото и скажи что менеджер свяжется чтобы оценить. "
+                            "Уточни: год выпуска и пробег если ещё не знаешь.]"
+                        )
+                    else:
+                        photo_hint = (
+                            "[Клиент прислал фото. Возможно это его текущая машина (трейд-ин) "
+                            "или он ищет внешний вид конкретной модели. "
+                            "Спроси один короткий вопрос: «Это ваш нынешний автомобиль "
+                            "или показать наши?»]"
+                        )
+
+                    await _reply(client, chat_id, "[клиент прислал фото]", name,
+                                 lang_for_photo, msg_ts=event.date.timestamp(),
+                                 extra_context_override=photo_hint)
+                    return
+
                 # Шаринг контакта (кнопка «Поделиться номером»)
                 # — только если клиент в шаге ask_phone тест-драйва
-                if (isinstance(event.message.media, MessageMediaContact)
+                elif (isinstance(event.message.media, MessageMediaContact)
                         and chat_id in _td_state
                         and _td_state[chat_id].get("step") == "ask_phone"):
                     raw_phone = event.message.media.phone_number or ""

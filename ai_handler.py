@@ -1203,7 +1203,7 @@ async def get_ai_reply(
 
     def _call():
         return _ai.messages.create(
-            model="claude-opus-4-5",
+            model="claude-sonnet-4-5",
             max_tokens=320,
             system=system,
             messages=messages[-12:],
