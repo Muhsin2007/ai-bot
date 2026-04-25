@@ -9,6 +9,7 @@ TAT AUTO — Telegram Sales Bot
   • Прайс отправляется ОДНИМ сообщением.
 """
 import asyncio
+import io
 import os
 import random
 import re
@@ -35,6 +36,7 @@ from storage_db import (
     save_appointment, get_upcoming_appointments,
     save_training_qa, get_all_training_qa, delete_training_qa, count_training_qa,
     set_conversation_label, get_conversation_label,
+    search_clients_by_phone, search_clients_by_name,
 )
 from voice_handler import transcribe_voice
 from ai_handler import (
@@ -50,6 +52,7 @@ from ai_handler import (
     detect_post_purchase, extract_conversation_patterns,
     interpret_sticker,
     detect_nasiya_calc, NASIYA_ROUTING_MSG,
+    detect_model_comparison, get_model_comparison,
 )
 
 load_dotenv()
@@ -68,6 +71,14 @@ ANTISPAM_COOLDOWN_MIN  = 2    # мин — минимальный интерва
 TG_HISTORY_LIMIT       = 50   # кол-во сообщений загружаемых из TG при первом контакте
 MISSED_MSG_MAX_AGE_H   = 12   # часов — не обрабатывать сообщения старше этого
 BATCH_WAIT_S           = 2.5  # сек — ждём дополнительных сообщений перед ответом
+
+# Часы работы (UTC+5, Ташкент)
+WORK_HOUR_START = 10   # 10:00
+WORK_HOUR_END   = 20   # 20:00
+TZ_OFFSET_H     = 5    # UTC+5
+
+# Кэш канала (прайс + локация) — 30 минут
+_CHANNEL_CACHE_TTL = 1800
 
 # Координаты салона
 LOCATION_LAT = 41.27141264101891
@@ -123,6 +134,10 @@ _ACTIVE_MODEL_TTL = 30 * 60           # сек — активная модель
 
 _ai_fail_notified: dict[int, float] = {}  # chat_id → timestamp последнего уведомления AI-ошибки
 
+# Кэш сообщений из канала (прайс и локация)
+_price_cache:    dict = {"msg": None, "ts": 0.0}   # msg = объект сообщения из TG
+_location_cache: dict = {"msg": None, "ts": 0.0}
+
 me_id:       int   = 0
 _startup_ts: float = 0.0
 
@@ -130,6 +145,19 @@ _startup_ts: float = 0.0
 # ══════════════════════════════════════════════════════════════════════════════
 # HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
+
+def _is_work_hours() -> bool:
+    """Рабочее время с 10:00 до 20:00 по Ташкентскому времени (UTC+5)."""
+    now_uz = time.gmtime(time.time() + TZ_OFFSET_H * 3600)
+    return WORK_HOUR_START <= now_uz.tm_hour < WORK_HOUR_END
+
+
+_OFF_HOURS_MSG = {
+    "ru": "Сейчас нерабочее время. Работаем с 10:00 до 20:00. Отвечу утром — ваш вопрос сохранён!",
+    "uz": "Hozir ish vaqti emas. 10:00 dan 20:00 gacha ishlaymiz. Ertalab javob beraman — savolingiz saqlanib qoldi!",
+    "en": "We're closed right now. Working hours: 10:00–20:00. I'll reply in the morning — your message is saved!",
+}
+
 
 def _is_paused(chat_id: int) -> bool:
     """Менеджер недавно ответил вручную — бот молчит."""
@@ -430,9 +458,17 @@ async def _send_location(client: TelegramClient, chat_id: int):
     # ── Режим A: venue из канала (как прайс) ──────────────────────────────
     if LOCATION_MSG_ID > 0:
         try:
-            channel = await client.get_entity(PRICE_CHANNEL)
-            msgs    = await client.get_messages(channel, ids=[LOCATION_MSG_ID])
-            msg     = msgs[0] if msgs else None
+            # Кэш локации — не ходим в канал чаще раза в 30 минут
+            if time.time() - _location_cache["ts"] < _CHANNEL_CACHE_TTL and _location_cache["msg"]:
+                msg = _location_cache["msg"]
+                log.debug("Локация: из кэша")
+            else:
+                channel = await client.get_entity(PRICE_CHANNEL)
+                msgs    = await client.get_messages(channel, ids=[LOCATION_MSG_ID])
+                msg     = msgs[0] if msgs else None
+                if msg:
+                    _location_cache["msg"] = msg
+                    _location_cache["ts"]  = time.time()
 
             if msg and isinstance(msg.media, (MessageMediaVenue, MessageMediaGeo)):
                 media = msg.media
@@ -501,9 +537,17 @@ async def _send_price(client: TelegramClient, chat_id: int):
       4. Fallback: текстовый прайс из БД
     """
     try:
-        channel = await client.get_entity(PRICE_CHANNEL)
-        msgs    = await client.get_messages(channel, ids=[PRICE_MSG_ID])
-        msg     = msgs[0] if msgs else None
+        # Кэш прайса — не ходим в канал чаще раза в 30 минут
+        if time.time() - _price_cache["ts"] < _CHANNEL_CACHE_TTL and _price_cache["msg"]:
+            msg = _price_cache["msg"]
+            log.debug("Прайс: из кэша")
+        else:
+            channel = await client.get_entity(PRICE_CHANNEL)
+            msgs    = await client.get_messages(channel, ids=[PRICE_MSG_ID])
+            msg     = msgs[0] if msgs else None
+            if msg:
+                _price_cache["msg"] = msg
+                _price_cache["ts"]  = time.time()
 
         if msg:
             caption = (msg.message or "").strip()
@@ -676,6 +720,18 @@ async def _reply(client: TelegramClient, chat_id: int, text: str, name: str,
         log.info("Пропуск (opted-out) -> %d", chat_id)
         return
 
+    # ── 0.5. Нерабочее время — один раз уведомляем, потом молчим ──────────
+    if not _is_work_hours():
+        # Отправляем уведомление не чаще раза в час на chat_id
+        if time.time() - _bot_sent.get(chat_id, 0) > 3600:
+            off_msg = _OFF_HOURS_MSG.get(lang, _OFF_HOURS_MSG["ru"])
+            add_message({}, chat_id, "user", text)
+            add_message({}, chat_id, "assistant", off_msg)
+            await safe_send(client.send_message, chat_id, off_msg)
+            _mark_sent(chat_id)
+            log.info("Нерабочее время -> %d | %s", chat_id, off_msg[:50])
+        return
+
     # ── 1. Менеджер уже ответил? ────────────────────────────────────────────
     if msg_ts and await _already_answered(client, chat_id, since_ts=msg_ts):
         log.info("Пропуск (менеджер ответил) -> %d", chat_id)
@@ -747,6 +803,7 @@ async def _reply(client: TelegramClient, chat_id: int, text: str, name: str,
     buying_intent     = detect_buying_intent(text)
     only_greeting     = is_greeting_only(text)
     hesitation_level, h_score = detect_hesitation(text)
+    asking_comparison = detect_model_comparison(text)
 
     # ── 7. Данные клиента ───────────────────────────────────────────────────
     info         = get_client_info(chat_id)
@@ -821,6 +878,19 @@ async def _reply(client: TelegramClient, chat_id: int, text: str, name: str,
         asyncio.create_task(_notify(client,
             f"🔄 TRADE-IN: {name} ({chat_id})\n«{text[:200]}»"))
 
+    # Авто-трейд-ин: клиент активно интересуется, но ни разу не упомянул свою машину
+    elif (not info.get("tradein_asked")
+            and not has_tradein
+            and model_key
+            and count_messages(chat_id) >= 5
+            and (buying_intent or hesitation_level in ("средний", "слабый"))):
+        extra_parts.append(
+            "[Клиент уже несколько раз интересовался авто. "
+            "Ненавязчиво спроси ОДИН раз в конце ответа: «Есть текущий автомобиль? "
+            "Можем рассмотреть его в счёт нового.» Только если уместно по контексту.]"
+        )
+        set_client_info(chat_id, tradein_asked=True)
+
     if only_greeting and is_new:
         extra_parts.append(
             "[Клиент только поздоровался. "
@@ -859,6 +929,22 @@ async def _reply(client: TelegramClient, chat_id: int, text: str, name: str,
         extra_parts.insert(0, extra_context_override)
 
     extra_context = "\n".join(extra_parts)
+
+    # ── 10.2. Сравнение моделей — таблица перед AI-ответом ──────────────────
+    if asking_comparison:
+        _cmp_models = get_all_models_from_text(text)
+        if len(_cmp_models) < 2:
+            _active = _get_active_model(chat_id)
+            if _active and _active != "free_318":
+                _cmp_models = [_active, "free_318"]
+            else:
+                _cmp_models = ["courage", "free_318"]
+        _cmp_text = get_model_comparison(_cmp_models, lang)
+        if _cmp_text:
+            await safe_send(client.send_message, chat_id, _cmp_text)
+            add_message({}, chat_id, "assistant", "[Таблица сравнения моделей отправлена]")
+            _mark_sent(chat_id)
+            await asyncio.sleep(1)
 
     # ── 10. Тест-драйв → отдельный флоу ────────────────────────────────────
     if asking_testdrive and not info.get("testdrive_scheduled"):
@@ -1472,6 +1558,8 @@ async def _cmd_help(client: TelegramClient, chat_id: int):
         "/клиенты — воронка по стадиям\n"
         "/тестдрайвы — предстоящие записи\n"
         "/чат ID [стр] — история переписки\n"
+        "/поиск ЗАПРОС — найти клиента по телефону или имени\n"
+        "/экспорт — выгрузить всю базу в CSV-файл\n"
         "/сделка ID [модель] — зафиксировать покупку\n"
         "/успех ID [примечание] — отметить успешный диалог\n\n"
         "📚 База знаний:\n"
@@ -1487,6 +1575,87 @@ async def _cmd_help(client: TelegramClient, chat_id: int):
         "@username текст\n"
         "+998901234567 текст"
     )
+
+
+async def _cmd_search(client: TelegramClient, chat_id: int, text: str):
+    """
+    /поиск ЗАПРОС — поиск клиента по телефону или имени.
+    /поиск 998901234567   — по номеру
+    /поиск Азиз           — по имени
+    """
+    parts = text.split(None, 1)
+    if len(parts) < 2:
+        await safe_send(client.send_message, chat_id,
+            "Использование:\n"
+            "/поиск 998901234567 — по телефону\n"
+            "/поиск Азиз        — по имени")
+        return
+
+    query = parts[1].strip()
+    digits_only = re.sub(r"[\s\-\(\)\+]", "", query)
+
+    if digits_only.isdigit() and len(digits_only) >= 7:
+        results = search_clients_by_phone(digits_only)
+        search_type = "телефону"
+    else:
+        results = search_clients_by_name(query)
+        search_type = "имени"
+
+    if not results:
+        await safe_send(client.send_message, chat_id,
+            f"Клиент по {search_type} «{query}» не найден.")
+        return
+
+    lines = [f"Найдено по {search_type} «{query}»:\n"]
+    for r in results[:10]:
+        cid   = r.get("chat_id", "?")
+        name  = r.get("name") or f"ID {cid}"
+        model = (r.get("model") or "?").replace("_", " ").upper()
+        stage = r.get("stage", "new")
+        lines.append(f"• {name} | {model} | {stage}")
+        lines.append(f"  /чат {cid}")
+
+    await safe_send(client.send_message, chat_id, "\n".join(lines))
+
+
+async def _cmd_export(client: TelegramClient, chat_id: int):
+    """
+    /экспорт — выгружает всю базу клиентов в CSV-файл и присылает в Избранные.
+    Кодировка UTF-8 BOM — открывается в Excel без настроек.
+    """
+    all_clients = get_all_clients()
+    if not all_clients:
+        await safe_send(client.send_message, chat_id, "📭 База клиентов пуста.")
+        return
+
+    lines = ["chat_id;name;model;stage;lang;opted_out;purchased;testdrive_scheduled"]
+    for cid_str, info in all_clients.items():
+        def _esc(v):
+            s = str(v or "").replace('"', '""')
+            return f'"{s}"' if ";" in s or '"' in s or "\n" in s else str(v or "")
+
+        lines.append(";".join([
+            cid_str,
+            _esc(info.get("name", "")),
+            _esc((info.get("model") or "").replace("_", " ").upper()),
+            _esc(info.get("stage", "new")),
+            _esc(info.get("lang", "ru")),
+            "1" if info.get("opted_out") else "0",
+            "1" if info.get("purchased") else "0",
+            "1" if info.get("testdrive_scheduled") else "0",
+        ]))
+
+    csv_bytes = ("\n".join(lines)).encode("utf-8-sig")  # BOM для Excel
+    file_obj  = io.BytesIO(csv_bytes)
+    file_obj.name = f"clients_{time.strftime('%Y%m%d_%H%M')}.csv"
+
+    result = await safe_send(
+        client.send_file, chat_id, file_obj,
+        caption=f"📊 Экспорт базы: {len(all_clients)} клиентов · {time.strftime('%d.%m.%Y %H:%M')}",
+    )
+    if result is None:
+        await safe_send(client.send_message, chat_id, "❌ Не удалось отправить файл.")
+    log.info("Экспорт: %d клиентов -> %d", len(all_clients), chat_id)
 
 
 async def _handle_saved_messages(client: TelegramClient, event):
@@ -1668,6 +1837,31 @@ async def main():
                                  extra_context_override=photo_hint)
                     return
 
+                # Видео-кружок (video_note) и обычное видео
+                elif (getattr(event.message, "video_note", None) is not None
+                        or getattr(event.message, "video", None) is not None):
+                    info = get_client_info(chat_id)
+                    lang_for_video = info.get("lang") or "ru"
+                    if not info.get("name") and name != "Клиент":
+                        set_client_info(chat_id, name=name)
+                    is_circle = getattr(event.message, "video_note", None) is not None
+                    if is_circle:
+                        video_hint = (
+                            "[Клиент прислал видео-кружок. "
+                            "Это личный и тёплый жест — ответь дружески. "
+                            "Задай один вопрос чтобы продолжить разговор об авто.]"
+                        )
+                    else:
+                        video_hint = (
+                            "[Клиент прислал видео. Возможно это видео его машины "
+                            "(трейд-ин) или он показывает что-то по теме. "
+                            "Отреагируй естественно и задай один уточняющий вопрос.]"
+                        )
+                    await _reply(client, chat_id, "[клиент прислал видео]", name,
+                                 lang_for_video, msg_ts=event.date.timestamp(),
+                                 extra_context_override=video_hint)
+                    return
+
                 # Шаринг контакта (кнопка «Поделиться номером»)
                 # — только если клиент в шаге ask_phone тест-драйва
                 elif (isinstance(event.message.media, MessageMediaContact)
@@ -1693,13 +1887,38 @@ async def main():
             set_client_info(chat_id, **updates)
 
             msg_ts = event.date.timestamp()
-            log.info("← %s | %s | %s", name, lang, text[:80])
+
+            # Пересланные сообщения — добавляем контекст для AI
+            is_forwarded = event.message.fwd_from is not None
+            fwd_override = ""
+            if is_forwarded:
+                fwd_from = event.message.fwd_from
+                # Пытаемся узнать откуда переслано
+                from_name = (
+                    getattr(fwd_from, "from_name", None)
+                    or getattr(getattr(fwd_from, "from_id", None), "channel_id", None)
+                )
+                src = f" из «{from_name}»" if from_name else ""
+                fwd_override = (
+                    f"[Клиент переслал сообщение{src}. Текст: «{text[:300]}». "
+                    f"Свяжи с темой автомобилей если возможно. "
+                    f"Задай один уточняющий вопрос чтобы понять интерес клиента.]"
+                )
+                log.info("← FWD %s (%d): %s", name, chat_id, text[:60])
+            else:
+                log.info("← %s | %s | %s", name, lang, text[:80])
 
             # Флоу тест-драйва (шаг ввода телефона) — отвечаем немедленно,
             # не буферизуем: нельзя смешивать номер телефона с другим текстом.
             if (chat_id in _td_state
                     and _td_state[chat_id].get("step") == "ask_phone"):
                 await _reply(client, chat_id, text, name, lang, msg_ts=msg_ts)
+                return
+
+            # Пересланное сообщение — отвечаем сразу (не дебаунсим)
+            if is_forwarded and fwd_override:
+                await _reply(client, chat_id, text, name, lang,
+                             msg_ts=msg_ts, extra_context_override=fwd_override)
                 return
 
             # Дебаунс — ждём BATCH_WAIT_S секунд перед ответом.
@@ -1762,6 +1981,12 @@ async def main():
 
             elif text.startswith("/импорт"):
                 asyncio.create_task(_cmd_import_conversation(client, chat_id, text))
+
+            elif text.startswith("/поиск"):
+                await _cmd_search(client, chat_id, text)
+
+            elif text.startswith("/экспорт"):
+                asyncio.create_task(_cmd_export(client, chat_id))
 
             elif text.startswith("@") or re.match(r"\+?[\d][\d\s\-]{7,14}", text):
                 await _handle_saved_messages(client, event)

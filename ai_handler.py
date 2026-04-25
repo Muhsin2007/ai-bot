@@ -1477,3 +1477,93 @@ def get_model_from_text(text: str) -> str | None:
     """Возвращает первую найденную модель (обратно совместима с прежней сигнатурой)."""
     models = get_all_models_from_text(text)
     return models[0] if models else None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MODEL COMPARISON
+# ══════════════════════════════════════════════════════════════════════════════
+
+_COMPARISON_KW = [
+    "сравни", "сравнение", "чем отличается", "чем отличаются", "разница между",
+    "что лучше", "что выбрать", "какой лучше", "какая лучше",
+    "solishtir", "farqi", "qaysi yaxshi", "qaysi biri",
+    "солиштир", "фарқи", "қайси яхши",
+    "compare", "difference between", "which is better",
+]
+
+_MODEL_SPECS: dict[str, dict] = {
+    "courage": {
+        "name": "Voyah Courage", "range": "650 км", "power": "360 л.с.",
+        "drive": "Задний", "battery": "88 кВт·ч CATL", "seats": "5",
+        "suspension": "Стандартная", "price": "от 550 млн сум",
+        "nasiya": "OFB кредит", "highlight": "Макс. запас хода, спорт-дизайн",
+    },
+    "free_318": {
+        "name": "Voyah Free 318", "range": "560 км", "power": "435 л.с.",
+        "drive": "Полный (AWD)", "battery": "88 кВт·ч CATL", "seats": "5",
+        "suspension": "Воздушная", "price": "от 650 млн сум",
+        "nasiya": "Насия 30% / OFB", "highlight": "Воздушная подвеска, флагман",
+    },
+    "free_plus": {
+        "name": "Voyah Free+", "range": "620 км", "power": "435 л.с.",
+        "drive": "Полный (AWD)", "battery": "100 кВт·ч CATL", "seats": "6",
+        "suspension": "Воздушная", "price": "от 720 млн сум",
+        "nasiya": "OFB кредит", "highlight": "6 мест, большая батарея",
+    },
+    "m817": {
+        "name": "M-Hero M817", "range": "520 км", "power": "800 л.с.",
+        "drive": "4x4 внедорожный", "battery": "142 кВт·ч", "seats": "5",
+        "suspension": "Внедорожная", "price": "от 1 100 млн сум",
+        "nasiya": "Насия 30% / OFB", "highlight": "800 л.с., бронированный класс",
+    },
+    "taishan": {
+        "name": "Voyah Taishan", "range": "680 км", "power": "510 л.с.",
+        "drive": "Полный (AWD)", "battery": "110 кВт·ч", "seats": "7",
+        "suspension": "Воздушная", "price": "от 850 млн сум",
+        "nasiya": "OFB кредит", "highlight": "7 мест, макс. запас в линейке",
+    },
+}
+
+
+def detect_model_comparison(text: str) -> bool:
+    """True если клиент просит сравнить модели."""
+    t = text.lower()
+    return any(kw in t for kw in _COMPARISON_KW)
+
+
+def get_model_comparison(model_keys: list[str], lang: str = "ru") -> str:
+    """Форматированное сравнение моделей. Пустая строка если меньше 2 моделей."""
+    keys = [k for k in model_keys if k in _MODEL_SPECS]
+    if len(keys) < 2:
+        return ""
+
+    specs = [_MODEL_SPECS[k] for k in keys]
+
+    if lang == "uz":
+        header = "Modellar taqqoslashi:\n"
+        field_labels = [
+            ("name", "Model"), ("range", "Yurish"), ("power", "Quvvat"),
+            ("drive", "Yetakchi"), ("suspension", "Suspenziya"),
+            ("seats", "O'rindiqlar"), ("price", "Narx"), ("highlight", "Asosiy afzallik"),
+        ]
+    elif lang == "en":
+        header = "Model comparison:\n"
+        field_labels = [
+            ("name", "Model"), ("range", "Range"), ("power", "Power"),
+            ("drive", "Drive"), ("suspension", "Suspension"),
+            ("seats", "Seats"), ("price", "Price"), ("highlight", "Key advantage"),
+        ]
+    else:
+        header = "Сравнение моделей:\n"
+        field_labels = [
+            ("name", "Модель"), ("range", "Запас хода"), ("power", "Мощность"),
+            ("drive", "Привод"), ("suspension", "Подвеска"),
+            ("seats", "Мест"), ("price", "Цена"), ("highlight", "Главное"),
+        ]
+
+    lines = [header]
+    for field, label in field_labels:
+        values = " / ".join(str(s.get(field, "—")) for s in specs)
+        lines.append(f"{label}: {values}")
+
+    return "\n".join(lines)

@@ -634,3 +634,59 @@ def get_conversation_label(chat_id: int) -> str | None:
             "SELECT label FROM conversation_labels WHERE chat_id = ?", (chat_id,)
         ).fetchone()
     return row["label"] if row else None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SEARCH
+# ══════════════════════════════════════════════════════════════════════════════
+
+def search_clients_by_phone(phone_fragment: str) -> list[dict]:
+    """
+    Ищет клиентов у которых в extra_json есть телефон содержащий phone_fragment.
+    phone_fragment — строка из цифр без пробелов/дефисов.
+    Возвращает список dict с полями chat_id, name, model, stage, lang.
+    """
+    import json as _json
+    import re as _re
+
+    with _raw_conn() as conn:
+        rows = conn.execute(
+            "SELECT chat_id, name, model, stage, lang, extra_json FROM clients ORDER BY rowid DESC",
+        ).fetchall()
+
+    results = []
+    for row in rows:
+        d = dict(row)
+        extra = {}
+        try:
+            extra = _json.loads(d.pop("extra_json") or "{}")
+        except Exception:
+            d.pop("extra_json", None)
+        phone_raw = str(extra.get("phone", ""))
+        phone_digits = _re.sub(r"[\s\-\(\)\+]", "", phone_raw)
+        if phone_fragment in phone_digits:
+            results.append(d)
+        if len(results) >= 20:
+            break
+
+    return results
+
+
+def search_clients_by_name(name_fragment: str) -> list[dict]:
+    """
+    Ищет клиентов по имени (частичное совпадение, без учёта регистра).
+    Возвращает список dict с полями chat_id, name, model, stage, lang.
+    """
+    with _raw_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT chat_id, name, model, stage, lang
+            FROM clients
+            WHERE name IS NOT NULL AND name != ''
+              AND LOWER(name) LIKE LOWER(?)
+            ORDER BY rowid DESC
+            LIMIT 20
+            """,
+            (f"%{name_fragment}%",),
+        ).fetchall()
+    return [dict(row) for row in rows]
